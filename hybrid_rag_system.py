@@ -1,513 +1,4 @@
-class HybridRAGBot:
-    """Complete RAG system combining ML and LLM components for large PDFs."""
-    
-    def __init__(self, 
-                 pdf_directory: str = PDF_DIRECTORY,
-                 model_name: str = MODEL_NAME,
-                 embedding_model: str = EMBEDDING_MODEL_NAME,
-                 auth_token: Optional[str] = HF_TOKEN,
-                 chunk_size: int = CHUNK_SIZE,
-                 chunk_overlap: int = CHUNK_OVERLAP,
-                 top_k: int = 5):
-        self.pdf_directory = pdf_directory
-        self.top_k = top_k
-        
-        # Initialize components
-        logger.info("Initializing PDF processor...")
-        self.pdf_processor = AdvancedPDFProcessor(
-            chunk_size=chunk_size, 
-            chunk_overlap=chunk_overlap
-        )
-        
-        logger.info("Initializing hybrid retriever...")
-        self.retriever = HybridRetriever(
-            tfidf_weight=0.3,
-            dense_weight=0.7,
-            model_name=embedding_model
-        )
-        
-        logger.info("Initializing LLM generator...")
-        self.generator = LLMGenerator(
-            model_name=model_name,
-            auth_token=auth_token
-        )
-        
-        # Storage for document chunks
-        self.chunks = []
-        self.processed = False
-    
-    def process_documents(self, force_reprocess: bool = False):
-        """Process all PDFs in the directory and create embeddings."""
-        if self.processed and not force_reprocess:
-            logger.info("Documents already processed. Use force_reprocess=True to reprocess.")
-            return
-        
-        # Process PDFs
-        start_time = time.time()
-        logger.info(f"Processing documents from {self.pdf_directory}...")
-        
-        self.chunks = self.pdf_processor.process_directory(self.pdf_directory)
-        
-        if not self.chunks:
-            logger.error("No document chunks were created. Check if PDFs exist and are readable.")
-            return
-        
-        # Train retriever
-        logger.info("Training retriever models...")
-        self.retriever.fit(self.chunks)
-        
-        self.processed = True
-        elapsed = time.time() - start_time
-        logger.info(f"Document processing completed in {elapsed:.2f} seconds")
-    
-    def answer_query(self, query: str) -> Dict[str, Any]:
-        """Answer a query using the RAG pipeline."""
-        if not self.processed:
-            logger.error("Documents not processed yet. Call process_documents() first.")
-            return {
-                "query": query,
-                "answer": "Documents not processed yet. Please process documents first.",
-                "sources": []
-            }
-        
-        try:
-            # Retrieve relevant chunks
-            logger.info(f"Processing query: {query}")
-            context_chunks = self.retriever.query(query, self.top_k)
-            
-            if not context_chunks:
-                return {
-                    "query": query,
-                    "answer": "No relevant information found in the documents.",
-                    "sources": []
-                }
-            
-            # Format sources for return
-            sources = []
-            for chunk, score in context_chunks:
-                sources.append({
-                    "source": chunk.source,
-                    "page": chunk.page,
-                    "chunk_id": chunk.chunk_id,
-                    "score": score
-                })
-            
-            # Generate answer
-            answer = self.generator.generate(query, context_chunks)
-            
-            return {
-                "query": query,
-                "answer": answer,
-                "sources": sources
-            }
-            
-        except Exception as e:
-            logger.error(f"Error answering query: {str(e)}")
-            return {
-                "query": query,
-                "answer": f"Error processing query: {str(e)}",
-                "sources": []
-            }
-    
-    def save(self, filepath: str):
-        """Save the processed model for later use."""
-        if not self.processed:
-            logger.error("Cannot save unprocessed model. Process documents first.")
-            return False
-        
-        try:
-            # Create a representation without the actual models
-            save_dict = {
-                "chunks": self.chunks,
-                "tfidf_vectorizer": self.retriever.tfidf_retriever.vectorizer,
-                "tfidf_svd": self.retriever.tfidf_retriever.svd,
-                "tfidf_document_vectors": self.retriever.tfidf_retriever.document_vectors,
-                "dense_embeddings": self.retriever.dense_retriever.embeddings,
-                "processed": self.processed,
-                "top_k": self.top_k,
-                "model_name": self.generator.model_name
-            }
-            
-            logger.info(f"Saving model to {filepath}...")
-            with open(filepath, 'wb') as f:
-                pickle.dump(save_dict, f)
-            
-            logger.info("Model saved successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Error saving model: {str(e)}")
-            return False
-    
-    @classmethod
-    def load(cls, filepath: str, pdf_directory: str = PDF_DIRECTORY, 
-             auth_token: Optional[str] = HF_TOKEN) -> 'HybridRAGBot':
-        """Load a previously saved model."""
-        try:
-            logger.info(f"Loading model from {filepath}...")
-            with open(filepath, 'rb') as f:
-                save_dict = pickle.load(f)
-            
-            # Create a new instance
-            rag_bot = cls(
-                pdf_directory=pdf_directory,
-                model_name=save_dict.get("model_name", MODEL_NAME),
-                auth_token=auth_token,
-                top_k=save_dict.get("top_k", 5)
-            )
-            
-            # Restore state
-            rag_bot.chunks = save_dict["chunks"]
-            rag_bot.processed = save_dict["processed"]
-            
-            # Restore TF-IDF state
-            rag_bot.retriever.tfidf_retriever.vectorizer = save_dict["tfidf_vectorizer"]
-            rag_bot.retriever.tfidf_retriever.svd = save_dict["tfidf_svd"]
-            rag_bot.retriever.tfidf_retriever.document_vectors = save_dict["tfidf_document_vectors"]
-            rag_bot.retriever.tfidf_retriever.chunks = save_dict["chunks"]
-            rag_bot.retriever.tfidf_retriever.fitted = True
-            
-            # Restore dense retriever state
-            rag_bot.retriever.dense_retriever.embeddings = save_dict["dense_embeddings"]
-            rag_bot.retriever.dense_retriever.chunks = save_dict["chunks"]
-            rag_bot.retriever.dense_retriever.fitted = True
-            
-            # Recreate FAISS index if available
-            if FAISS_AVAILABLE and rag_bot.retriever.dense_retriever.embeddings is not None:
-                embeddings = rag_bot.retriever.dense_retriever.embeddings
-                dimension = embeddings.shape[1]
-                rag_bot.retriever.dense_retriever.index = faiss.IndexFlatIP(dimension)
-                
-                # Normalize vectors for cosine similarity
-                normalized_embeddings = embeddings.copy()
-                faiss.normalize_L2(normalized_embeddings)
-                rag_bot.retriever.dense_retriever.index.add(normalized_embeddings)
-            
-            # Mark retriever as fitted
-            rag_bot.retriever.fitted = True
-            
-            logger.info("Model loaded successfully")
-            return rag_bot
-            
-        except Exception as e:
-            logger.error(f"Error loading model: {str(e)}")
-            raise
-
-
-def demo():
-    """Run a demonstration of the RAG system."""
-    # Configure the system
-    pdf_dir = input("Enter the directory containing your PDF files [./pdfs]: ") or "./pdfs"
-    hf_token = input("Enter your Hugging Face token (press Enter to use default): ") or HF_TOKEN
-    
-    # Initialize and process
-    rag_bot = HybridRAGBot(
-        pdf_directory=pdf_dir,
-        auth_token=hf_token,
-        top_k=5
-    )
-    
-    print("\nProcessing documents. This may take a while depending on the number and size of PDFs...")
-    rag_bot.process_documents()
-    
-    # Save the model
-    rag_bot.save("hybrid_rag_model.pkl")
-    print("\nModel saved to hybrid_rag_model.pkl")
-    
-    # Interactive query loop
-    print("\n=== Hybrid RAG Bot ===")
-    print("Ask questions about your documents. Type 'exit' to quit.")
-    
-    while True:
-        query = input("\nEnter your question: ")
-        if query.lower() in ['exit', 'quit']:
-            break
-        
-        result = rag_bot.answer_query(query)
-        
-        print(f"\nAnswer: {result['answer']}")
-        print("\nSources:")
-        for source in result['sources']:
-            print(f"- {source['source']} (Page {source['page']}) - Score: {source['score']:.4f}")
-    
-    print("\nThank you for using Hybrid RAG Bot!")
-
-
-# Main function for Kaggle environments
-def run_for_kaggle(pdf_directory="/kaggle/input/dataset-of-quantum-book"):
-    """Run the hybrid RAG bot with preset configuration for Kaggle."""
-    try:
-        # Initialize model
-        rag_bot = HybridRAGBot(
-            pdf_directory=pdf_directory,
-            auth_token=HF_TOKEN,
-            top_k=5
-        )
-        
-        # Process documents
-        rag_bot.process_documents()
-        
-        # Save model
-        rag_bot.save("/kaggle/working/hybrid_rag_model.pkl")
-        print("Model saved to /kaggle/working/hybrid_rag_model.pkl")
-        
-        # Test with sample queries
-        sample_queries = [
-            "What is quantum entanglement?",
-            "Explain the uncertainty principle",
-            "How do quantum computers work?",
-            "What is the relationship between quantum mechanics and relativity?",
-            "Explain the concept of quantum superposition"
-        ]
-        
-        results = []
-        for query in sample_queries:
-            print(f"\nQuery: {query}")
-            result = rag_bot.answer_query(query)
-            print(f"Answer: {result['answer']}")
-            
-            # Save results
-            results.append({
-                "query": query,
-                "answer": result["answer"],
-                "sources": [f"{s['source']} (Page {s['page']})" for s in result["sources"]]
-            })
-        
-        # Save results to CSV
-        results_df = pd.DataFrame(results)
-        results_df.to_csv("/kaggle/working/sample_results.csv", index=False)
-        print("\nSample results saved to /kaggle/working/sample_results.csv")
-        
-        return rag_bot
-    
-    except Exception as e:
-        print(f"Error in Kaggle execution: {str(e)}")
-        import traceback
-        traceback.print_exc()
-
-
-# Default execution
-if __name__ == "__main__":
-    # Check if running in Kaggle
-    if os.path.exists("/kaggle"):
-        print("Running in Kaggle environment...")
-        run_for_kaggle()
-    else:
-        # Run demo for local environments
-        demo()
-            
-
-class HybridRetriever:
-    """Hybrid retrieval system combining TF-IDF and dense embeddings."""
-    
-    def __init__(self, 
-                 tfidf_weight: float = 0.3, 
-                 dense_weight: float = 0.7,
-                 model_name: str = EMBEDDING_MODEL_NAME):
-        self.tfidf_retriever = TFIDFRetriever(use_svd=True)
-        self.dense_retriever = DenseRetriever(model_name=model_name)
-        self.tfidf_weight = tfidf_weight
-        self.dense_weight = dense_weight
-        self.chunks = []
-        self.fitted = False
-    
-    def fit(self, chunks: List[DocumentChunk]):
-        """Train both retrieval models."""
-        if not chunks:
-            logger.warning("No chunks provided for training.")
-            return
-        
-        self.chunks = chunks
-        
-        # Train TF-IDF retriever
-        logger.info("Training TF-IDF retriever...")
-        self.tfidf_retriever.fit(chunks)
-        
-        # Train dense retriever
-        logger.info("Training dense retriever...")
-        self.dense_retriever.fit(chunks)
-        
-        self.fitted = True
-        logger.info("Hybrid retriever trained successfully")
-    
-    def query(self, query_text: str, top_k: int = 5) -> List[Tuple[DocumentChunk, float]]:
-        """Retrieve the most relevant chunks using both methods."""
-        if not self.fitted:
-            logger.error("Hybrid retriever not fitted yet.")
-            return []
-        
-        try:
-            # Get more results than needed from each retriever
-            search_k = min(top_k * 2, len(self.chunks))
-            
-            tfidf_results = self.tfidf_retriever.query(query_text, search_k)
-            dense_results = self.dense_retriever.query(query_text, search_k)
-            
-            # Combine results with weights
-            combined_scores = {}
-            
-            for chunk, score in tfidf_results:
-                chunk_id = (chunk.source, chunk.page, chunk.chunk_id)
-                combined_scores[chunk_id] = self.tfidf_weight * score
-            
-            for chunk, score in dense_results:
-                chunk_id = (chunk.source, chunk.page, chunk.chunk_id)
-                if chunk_id in combined_scores:
-                    combined_scores[chunk_id] += self.dense_weight * score
-                else:
-                    combined_scores[chunk_id] = self.dense_weight * score
-            
-            # Create a mapping from IDs to chunks
-            chunk_map = {}
-            for chunk in self.chunks:
-                chunk_id = (chunk.source, chunk.page, chunk.chunk_id)
-                chunk_map[chunk_id] = chunk
-            
-            # Get top-k results
-            top_ids = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)[:top_k]
-            
-            results = []
-            for chunk_id in top_ids:
-                results.append((chunk_map[chunk_id], combined_scores[chunk_id]))
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Error in hybrid query: {str(e)}")
-            
-            # Fallback to TF-IDF if hybrid fails
-            logger.info("Falling back to TF-IDF retriever...")
-            return self.tfidf_retriever.query(query_text, top_k)
-
-
-class LLMGenerator:
-    """Generate responses using HuggingFace model with robust fallback."""
-    
-    def __init__(self, model_name: str = MODEL_NAME, auth_token: Optional[str] = None):
-        self.model_name = model_name
-        self.auth_token = auth_token
-        self.tokenizer = None
-        self.model = None
-        self.initialized = False
-        
-        # Try to initialize
-        try:
-            if not TRANSFORMERS_AVAILABLE:
-                logger.warning("Transformers library not available. Will use fallback text summarization mode.")
-                return
-
-            # Login to HuggingFace if token provided
-            if self.auth_token:
-                login(token=self.auth_token)
-            
-            # Load tokenizer and model
-            logger.info(f"Loading model: {self.model_name}")
-            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-            
-            # Use half precision and device mapping for memory efficiency
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.model_name,
-                torch_dtype=torch.float16,
-                device_map="auto"
-            )
-            
-            self.initialized = True
-            logger.info(f"Model {self.model_name} loaded successfully")
-            
-        except Exception as e:
-            logger.error(f"Error initializing model {self.model_name}: {str(e)}")
-            logger.info("Will use fallback text summarization mode")
-    
-    def generate(self, query: str, context_chunks: List[Tuple[DocumentChunk, float]], 
-                 max_new_tokens: int = 512) -> str:
-        """Generate a response based on the query and context chunks."""
-        # Format chunks with source information
-        context_text = ""
-        for i, (chunk, score) in enumerate(context_chunks):
-            context_part = f"[Document {i+1}] {chunk.source} (Page {chunk.page}):\n{chunk.text}\n\n"
-            context_text += context_part
-        
-        if self.initialized:
-            try:
-                # Create prompt
-                prompt = f"""
-You are a specialized AI research assistant with expertise in analyzing technical documents.
-Use only the information from the provided documents to answer the question.
-If the information to answer the question is not in the documents, say "I don't have enough information in the provided documents to answer this question."
-Be precise and cite specific documents and page numbers when providing information.
-
-DOCUMENTS:
-{context_text}
-
-QUESTION:
-{query}
-
-ANSWER:
 """
-                
-                # Generate response
-                inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-                
-                with torch.no_grad():
-                    outputs = self.model.generate(
-                        inputs.input_ids,
-                        max_new_tokens=max_new_tokens,
-                        do_sample=True,
-                        temperature=0.7,
-                        top_p=0.9,
-                        repetition_penalty=1.1
-                    )
-                
-                full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-                
-                # Extract only the answer part
-                answer_start = full_response.find("ANSWER:")
-                if answer_start != -1:
-                    answer = full_response[answer_start + 7:].strip()
-                else:
-                    answer = full_response.split(query)[-1].strip()
-                
-                return answer
-                
-            except Exception as e:
-                logger.error(f"Error generating response with LLM: {str(e)}")
-                logger.info("Falling back to text summarization mode")
-                return self._summarize_context(query, context_text)
-        else:
-            return self._summarize_context(query, context_text)
-    
-    def _summarize_context(self, query: str, context_text: str) -> str:
-        """Simple extractive summarization as a fallback."""
-        try:
-            # Extract sentences from context
-            import re
-            sentences = re.split(r'(?<=[.!?])\s+', context_text)
-            
-            # Score sentences based on word overlap with query
-            query_words = set(query.lower().split())
-            sentence_scores = []
-            
-            for sentence in sentences:
-                if len(sentence) < 10:  # Skip very short sentences
-                    continue
-                    
-                sentence_words = set(sentence.lower().split())
-                overlap = len(query_words.intersection(sentence_words))
-                score = overlap / len(sentence_words) if sentence_words else 0
-                sentence_scores.append((sentence, score))
-            
-            # Get top sentences
-            top_sentences = sorted(sentence_scores, key=lambda x: x[1], reverse=True)[:5]
-            
-            # Create a summary
-            summary = " ".join([s[0] for s in top_sentences])
-            
-            answer = f"Based on the provided documents, I found the following information about {query}:\n\n{summary}"
-            return answer
-            
-        except Exception as e:
-            logger.error(f"Error in fallback summarization: {str(e)}")
-            return f"I found relevant information in the documents, but couldn't generate a detailed response. Here's a short excerpt:\n\n{context_text[:500]}...""""
 Hybrid ML-LLM RAG System for Large Technical PDFs
 - Handles 8-15 large PDFs (500+ pages each)
 - Uses hybrid retrieval (TF-IDF + dense embeddings)
@@ -519,7 +10,6 @@ import os
 import re
 import time
 import math
-import torch
 import numpy as np
 import pandas as pd
 import pickle
@@ -527,7 +17,6 @@ import tempfile
 from typing import List, Dict, Tuple, Optional, Union, Generator, Any
 from dataclasses import dataclass
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import gc
 import json
 import logging
@@ -536,13 +25,31 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Configuration constants
+PDF_DIRECTORY = "./pdfs"
+HF_TOKEN = "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"  # Default token, should be replaced
+MODEL_NAME = "google/gemma-3-1b-it"
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # Lighter model for embeddings
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
+MAX_WORKERS = 4
+BATCH_SIZE = 64
+
 # PDF processing
-import PyPDF2
+try:
+    import PyPDF2
+except ImportError:
+    logger.warning("PyPDF2 not available. PDF processing will not work.")
 
 # ML and embeddings
-from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.decomposition import TruncatedSVD
+try:
+    from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+    from sklearn.decomposition import TruncatedSVD
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    logger.warning("scikit-learn not available. TF-IDF retrieval will not work.")
+    SKLEARN_AVAILABLE = False
 
 # Try to import sentence_transformers
 try:
@@ -560,6 +67,14 @@ except ImportError:
     logger.warning("FAISS not available. Will use numpy for vector similarity.")
     FAISS_AVAILABLE = False
 
+# Try to import torch
+try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    logger.warning("PyTorch not available. Will affect model performance.")
+    TORCH_AVAILABLE = False
+
 # Hugging Face integration
 try:
     from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -568,16 +83,6 @@ try:
 except ImportError:
     logger.warning("transformers not available. Will not be able to use Gemma 3 LLM.")
     TRANSFORMERS_AVAILABLE = False
-
-# Configuration
-PDF_DIRECTORY = "./pdfs"
-HF_TOKEN = "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"  # Default token, should be replaced
-MODEL_NAME = "google/gemma-3-1b-it"
-EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"  # Lighter model for embeddings
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200
-MAX_WORKERS = 4
-BATCH_SIZE = 64
 
 
 @dataclass
@@ -774,6 +279,11 @@ class TFIDFRetriever:
     """TF-IDF based retrieval system."""
     
     def __init__(self, use_svd: bool = True, n_components: int = 100):
+        if not SKLEARN_AVAILABLE:
+            logger.error("scikit-learn is not available. TFIDFRetriever cannot be used.")
+            self.fitted = False
+            return
+            
         self.vectorizer = TfidfVectorizer(
             strip_accents='unicode',
             lowercase=True,
@@ -792,6 +302,10 @@ class TFIDFRetriever:
     
     def fit(self, chunks: List[DocumentChunk]):
         """Train the TF-IDF model on document chunks."""
+        if not SKLEARN_AVAILABLE:
+            logger.error("scikit-learn is not available. Cannot fit TF-IDF model.")
+            return
+            
         if not chunks:
             logger.warning("No chunks provided for TF-IDF training.")
             return
@@ -817,6 +331,10 @@ class TFIDFRetriever:
     
     def query(self, query_text: str, top_k: int = 5) -> List[Tuple[DocumentChunk, float]]:
         """Retrieve the most relevant chunks for a query."""
+        if not SKLEARN_AVAILABLE:
+            logger.error("scikit-learn is not available. Cannot query TF-IDF model.")
+            return []
+            
         if not self.fitted:
             logger.error("TF-IDF model not fitted yet.")
             return []
@@ -880,6 +398,10 @@ class DenseRetriever:
     
     def _fallback_embedding(self, texts: List[str]) -> np.ndarray:
         """Fallback embedding method using TF-IDF and SVD."""
+        if not SKLEARN_AVAILABLE:
+            logger.error("scikit-learn is not available. Cannot create fallback embeddings.")
+            return np.zeros((len(texts), 100))  # Return dummy embeddings
+            
         logger.info("Using TF-IDF + SVD as fallback for embeddings")
         vectorizer = TfidfVectorizer(max_features=5000)
         tfidf_matrix = vectorizer.fit_transform(texts)
@@ -927,8 +449,9 @@ class DenseRetriever:
                 self.index = faiss.IndexFlatIP(dimension)
                 
                 # Normalize vectors for cosine similarity
-                faiss.normalize_L2(self.embeddings)
-                self.index.add(self.embeddings)
+                normalized_embeddings = self.embeddings.copy()
+                faiss.normalize_L2(normalized_embeddings)
+                self.index.add(normalized_embeddings)
             
             self.fitted = True
             logger.info(f"Dense embeddings created for {len(texts)} chunks")
@@ -954,10 +477,10 @@ class DenseRetriever:
             if FAISS_AVAILABLE and self.index is not None:
                 # Normalize query vector for cosine similarity
                 query_embedding_norm = query_embedding.copy()
-                faiss.normalize_L2(np.array([query_embedding_norm]))
+                faiss.normalize_L2(np.array([query_embedding_norm]).astype('float32'))
                 
                 # Search using FAISS
-                scores, indices = self.index.search(np.array([query_embedding_norm]), k=top_k)
+                scores, indices = self.index.search(np.array([query_embedding_norm]).astype('float32'), k=top_k)
                 
                 results = []
                 for i, idx in enumerate(indices[0]):
@@ -985,3 +508,270 @@ class DenseRetriever:
         except Exception as e:
             logger.error(f"Error querying dense retriever: {str(e)}")
             return []
+
+
+class HybridRetriever:
+    """Hybrid retrieval system combining TF-IDF and dense embeddings."""
+    
+    def __init__(self, 
+                 tfidf_weight: float = 0.3, 
+                 dense_weight: float = 0.7,
+                 model_name: str = EMBEDDING_MODEL_NAME):
+        self.tfidf_retriever = TFIDFRetriever(use_svd=True)
+        self.dense_retriever = DenseRetriever(model_name=model_name)
+        self.tfidf_weight = tfidf_weight
+        self.dense_weight = dense_weight
+        self.chunks = []
+        self.fitted = False
+    
+    def fit(self, chunks: List[DocumentChunk]):
+        """Train both retrieval models."""
+        if not chunks:
+            logger.warning("No chunks provided for training.")
+            return
+        
+        self.chunks = chunks
+        
+        # Train TF-IDF retriever
+        logger.info("Training TF-IDF retriever...")
+        self.tfidf_retriever.fit(chunks)
+        
+        # Train dense retriever
+        logger.info("Training dense retriever...")
+        self.dense_retriever.fit(chunks)
+        
+        self.fitted = True
+        logger.info("Hybrid retriever trained successfully")
+    
+    def query(self, query_text: str, top_k: int = 5) -> List[Tuple[DocumentChunk, float]]:
+        """Retrieve the most relevant chunks using both methods."""
+        if not self.fitted:
+            logger.error("Hybrid retriever not fitted yet.")
+            return []
+        
+        try:
+            # Get more results than needed from each retriever
+            search_k = min(top_k * 2, len(self.chunks))
+            
+            tfidf_results = self.tfidf_retriever.query(query_text, search_k)
+            dense_results = self.dense_retriever.query(query_text, search_k)
+            
+            # Combine results with weights
+            combined_scores = {}
+            
+            for chunk, score in tfidf_results:
+                chunk_id = (chunk.source, chunk.page, chunk.chunk_id)
+                combined_scores[chunk_id] = self.tfidf_weight * score
+            
+            for chunk, score in dense_results:
+                chunk_id = (chunk.source, chunk.page, chunk.chunk_id)
+                if chunk_id in combined_scores:
+                    combined_scores[chunk_id] += self.dense_weight * score
+                else:
+                    combined_scores[chunk_id] = self.dense_weight * score
+            
+            # Create a mapping from IDs to chunks
+            chunk_map = {}
+            for chunk in self.chunks:
+                chunk_id = (chunk.source, chunk.page, chunk.chunk_id)
+                chunk_map[chunk_id] = chunk
+            
+            # Get top-k results
+            top_ids = sorted(combined_scores.keys(), key=lambda x: combined_scores[x], reverse=True)[:top_k]
+            
+            results = []
+            for chunk_id in top_ids:
+                if chunk_id in chunk_map:  # Safeguard against missing chunks
+                    results.append((chunk_map[chunk_id], combined_scores[chunk_id]))
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error in hybrid query: {str(e)}")
+            
+            # Fallback to TF-IDF if hybrid fails
+            logger.info("Falling back to TF-IDF retriever...")
+            return self.tfidf_retriever.query(query_text, top_k)
+
+
+class LLMGenerator:
+    """Generate responses using HuggingFace model with robust fallback."""
+    
+    def __init__(self, model_name: str = MODEL_NAME, auth_token: Optional[str] = None):
+        self.model_name = model_name
+        self.auth_token = auth_token
+        self.tokenizer = None
+        self.model = None
+        self.initialized = False
+        
+        # Try to initialize
+        try:
+            if not TRANSFORMERS_AVAILABLE or not TORCH_AVAILABLE:
+                logger.warning("Transformers or PyTorch not available. Will use fallback text summarization mode.")
+                return
+
+            # Login to HuggingFace if token provided
+            if self.auth_token:
+                login(token=self.auth_token)
+            
+            # Load tokenizer and model
+            logger.info(f"Loading model: {self.model_name}")
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            
+            # Use half precision and device mapping for memory efficiency
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto" if torch.cuda.is_available() else None
+            )
+            
+            self.initialized = True
+            logger.info(f"Model {self.model_name} loaded successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing model {self.model_name}: {str(e)}")
+            logger.info("Will use fallback text summarization mode")
+    
+    def generate(self, query: str, context_chunks: List[Tuple[DocumentChunk, float]], 
+                 max_new_tokens: int = 512) -> str:
+        """Generate a response based on the query and context chunks."""
+        # Format chunks with source information
+        context_text = ""
+        for i, (chunk, score) in enumerate(context_chunks):
+            context_part = f"[Document {i+1}] {chunk.source} (Page {chunk.page}):\n{chunk.text}\n\n"
+            context_text += context_part
+        
+        if self.initialized:
+            try:
+                # Create prompt
+                prompt = f"""
+You are a specialized AI research assistant with expertise in analyzing technical documents.
+Use only the information from the provided documents to answer the question.
+If the information to answer the question is not in the documents, say "I don't have enough information in the provided documents to answer this question."
+Be precise and cite specific documents and page numbers when providing information.
+
+DOCUMENTS:
+{context_text}
+
+QUESTION:
+{query}
+
+ANSWER:
+"""
+                
+                # Generate response
+                inputs = self.tokenizer(prompt, return_tensors="pt")
+                if torch.cuda.is_available():
+                    inputs = inputs.to("cuda")
+                
+                with torch.no_grad():
+                    outputs = self.model.generate(
+                        inputs.input_ids,
+                        max_new_tokens=max_new_tokens,
+                        do_sample=True,
+                        temperature=0.7,
+                        top_p=0.9,
+                        repetition_penalty=1.1
+                    )
+                
+                full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                
+                # Extract only the answer part
+                answer_start = full_response.find("ANSWER:")
+                if answer_start != -1:
+                    answer = full_response[answer_start + 7:].strip()
+                else:
+                    answer = full_response.split(query)[-1].strip()
+                
+                return answer
+                
+            except Exception as e:
+                logger.error(f"Error generating response with LLM: {str(e)}")
+                logger.info("Falling back to text summarization mode")
+                return self._summarize_context(query, context_text)
+        else:
+            return self._summarize_context(query, context_text)
+    
+    def _summarize_context(self, query: str, context_text: str) -> str:
+        """Simple extractive summarization as a fallback."""
+        try:
+            # Extract sentences from context
+            import re
+            sentences = re.split(r'(?<=[.!?])\s+', context_text)
+            
+            # Score sentences based on word overlap with query
+            query_words = set(query.lower().split())
+            sentence_scores = []
+            
+            for sentence in sentences:
+                if len(sentence) < 10:  # Skip very short sentences
+                    continue
+                    
+                sentence_words = set(sentence.lower().split())
+                overlap = len(query_words.intersection(sentence_words))
+                score = overlap / len(sentence_words) if sentence_words else 0
+                sentence_scores.append((sentence, score))
+            
+            # Get top sentences
+            top_sentences = sorted(sentence_scores, key=lambda x: x[1], reverse=True)[:5]
+            
+            # Create a summary
+            summary = " ".join([s[0] for s in top_sentences])
+            
+            answer = f"Based on the provided documents, I found the following information about {query}:\n\n{summary}"
+            return answer
+            
+        except Exception as e:
+            logger.error(f"Error in fallback summarization: {str(e)}")
+            return f"I found relevant information in the documents, but couldn't generate a detailed response. Here's a short excerpt:\n\n{context_text[:500]}..."
+
+
+class HybridRAGBot:
+    """Complete RAG system combining ML and LLM components for large PDFs."""
+    
+    def __init__(self, 
+                 pdf_directory: str = PDF_DIRECTORY,
+                 model_name: str = MODEL_NAME,
+                 embedding_model: str = EMBEDDING_MODEL_NAME,
+                 auth_token: Optional[str] = HF_TOKEN,
+                 chunk_size: int = CHUNK_SIZE,
+                 chunk_overlap: int = CHUNK_OVERLAP,
+                 top_k: int = 5):
+        self.pdf_directory = pdf_directory
+        self.top_k = top_k
+        
+        # Initialize components
+        logger.info("Initializing PDF processor...")
+        self.pdf_processor = AdvancedPDFProcessor(
+            chunk_size=chunk_size, 
+            chunk_overlap=chunk_overlap
+        )
+        
+        logger.info("Initializing hybrid retriever...")
+        self.retriever = HybridRetriever(
+            tfidf_weight=0.3,
+            dense_weight=0.7,
+            model_name=embedding_model
+        )
+        
+        logger.info("Initializing LLM generator...")
+        self.generator = LLMGenerator(
+            model_name=model_name,
+            auth_token=auth_token
+        )
+        
+        # Storage for document chunks
+        self.chunks = []
+        self.processed = False
+    
+    def process_documents(self, force_reprocess: bool = False):
+        """Process all PDFs in the directory and create embeddings."""
+        if self.processed and not force_reprocess:
+            logger.info("Documents already processed. Use force_reprocess=True to reprocess.")
+            return
+        
+        # Process PDFs
+        start_time = time.time()
+        logger.info(f"Processing documents from {self.pdf_directory}...")
+        
+        self.chunks = self.pdf_processor.process_directory(self.
