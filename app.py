@@ -1,517 +1,481 @@
+import streamlit as st
 import os
+import sys
 import time
 import pickle
-import streamlit as st
 import pandas as pd
-import plotly.express as px
 from pathlib import Path
-import tempfile
-import base64
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Union, Any
 
-# Import the RAG Bot (assume hybrid_rag.py is in the same directory)
-from hybrid_rag import HybridRAGBot, DocumentChunk, logger
+# Import the RAG system
+# Assuming the RAG code is in a file called hybrid_rag.py in the same directory
+# If it's in the paste.txt file, save that content to hybrid_rag.py first
+import importlib.util
+try:
+    # Try to import if already saved as a module
+    from hybrid_rag import HybridRAGBot, DocumentChunk, AdvancedPDFProcessor, HybridRetriever, LLMGenerator
+except ImportError:
+    # If not saved yet, inform the user
+    st.error("Please save the RAG system code as 'hybrid_rag.py' in the same directory as this app.")
+    st.stop()
 
-# Configure Streamlit page
+# Constants from the original code
+PDF_DIRECTORY = "pdfs"
+HF_TOKEN = "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"  # Default token
+MODEL_NAME = "google/gemma-3-1b-it"
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
+
+# Streamlit app title and description
 st.set_page_config(
-    page_title="Hybrid RAG System",
+    page_title="Hybrid ML-LLM RAG System",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
+# Custom CSS for better styling
 st.markdown("""
 <style>
     .main-header {
-        font-size: 2.5rem !important;
-        font-weight: 600;
-        color: #1E88E5;
+        font-size: 2.5rem;
+        color: #4527A0;
+        margin-bottom: 0;
     }
     .sub-header {
-        font-size: 1.5rem !important;
-        font-weight: 500;
-        color: #0D47A1;
+        font-size: 1.5rem;
+        color: #5E35B1;
+        margin-top: 0;
     }
-    .source-box {
-        background-color: #f0f2f6;
-        border-radius: 5px;
-        padding: 10px;
-        margin-bottom: 10px;
+    .section-header {
+        font-size: 1.8rem;
+        color: #673AB7;
+        margin-top: 1rem;
     }
-    .stProgress .st-bo {
-        background-color: #1E88E5;
+    .highlight {
+        background-color: #EDE7F6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
     }
-    .source-title {
-        font-weight: 600;
-        color: #1E88E5;
+    .info-box {
+        background-color: #E3F2FD;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
     }
-    .chunk-text {
-        font-size: 0.9rem;
-        max-height: 200px;
-        overflow-y: auto;
+    .success-box {
+        background-color: #E8F5E9;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
     }
-    .sidebar .stButton button {
-        width: 100%;
+    .warning-box {
+        background-color: #FFF8E1;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .error-box {
+        background-color: #FFEBEE;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+    .stProgress > div > div > div {
+        background-color: #673AB7;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
-if "rag_bot" not in st.session_state:
+# Header
+st.markdown('<p class="main-header">Hybrid ML-LLM RAG System</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">Intelligent Document Question Answering</p>', unsafe_allow_html=True)
+
+# Sidebar for configuration
+st.sidebar.markdown("## Configuration")
+
+# PDF Directory
+pdf_dir = st.sidebar.text_input("PDF Directory", value=PDF_DIRECTORY)
+
+# HF Token
+hf_token = st.sidebar.text_input("Hugging Face Token", value=HF_TOKEN, type="password")
+
+# Advanced settings with expander
+with st.sidebar.expander("Advanced Settings", expanded=False):
+    model_name = st.text_input("LLM Model", value=MODEL_NAME)
+    embedding_model = st.text_input("Embedding Model", value=EMBEDDING_MODEL_NAME)
+    chunk_size = st.slider("Chunk Size", min_value=100, max_value=2000, value=CHUNK_SIZE, step=100)
+    chunk_overlap = st.slider("Chunk Overlap", min_value=0, max_value=500, value=CHUNK_OVERLAP, step=50)
+    top_k = st.slider("Top K Results", min_value=1, max_value=10, value=5, step=1)
+
+# Model loading/saving section
+st.sidebar.markdown("## Model Management")
+
+# File uploader for model
+uploaded_model = st.sidebar.file_uploader("Upload Saved Model", type=["pkl"])
+
+# Save model filename
+save_filename = st.sidebar.text_input("Save Model Filename", value="hybrid_rag_model.pkl")
+
+# Initialize session state for storing the RAG bot
+if 'rag_bot' not in st.session_state:
     st.session_state.rag_bot = None
-if "processing_complete" not in st.session_state:
-    st.session_state.processing_complete = False
-if "query_history" not in st.session_state:
+    st.session_state.model_loaded = False
+    st.session_state.document_stats = None
+    st.session_state.is_processing = False
     st.session_state.query_history = []
-if "model_saved" not in st.session_state:
-    st.session_state.model_saved = False
 
-# Sidebar
-st.sidebar.markdown("<div class='main-header'>Hybrid RAG</div>", unsafe_allow_html=True)
-st.sidebar.markdown("A robust Retrieval-Augmented Generation system for large technical PDFs")
+# Main app tabs
+tabs = st.tabs(["Setup & Process", "Query Documents", "Document Explorer", "Query History"])
 
-# PDF Upload section
-st.sidebar.markdown("<div class='sub-header'>📄 Document Upload</div>", unsafe_allow_html=True)
-uploaded_files = st.sidebar.file_uploader("Upload PDF files", accept_multiple_files=True, type=['pdf'])
-
-# Configuration options
-st.sidebar.markdown("<div class='sub-header'>⚙️ Configuration</div>", unsafe_allow_html=True)
-chunk_size = st.sidebar.slider("Chunk Size", 500, 2000, 1000, 100)
-chunk_overlap = st.sidebar.slider("Chunk Overlap", 50, 500, 200, 10)
-top_k = st.sidebar.slider("Number of chunks to retrieve", 1, 10, 5, 1)
-
-# Model weights
-st.sidebar.markdown("<div class='sub-header'>🧠 Retrieval Weights</div>", unsafe_allow_html=True)
-tfidf_weight = st.sidebar.slider("TF-IDF Weight", 0.0, 1.0, 0.3, 0.1)
-dense_weight = st.sidebar.slider("Dense Embeddings Weight", 0.0, 1.0, 0.7, 0.1)
-
-# Hugging Face Token
-st.sidebar.markdown("<div class='sub-header'>🔑 API Configuration</div>", unsafe_allow_html=True)
-hf_token = st.sidebar.text_input("Hugging Face Token", 
-                              value="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",
-                              type="password")
-
-# Optional: Model selection (if implementing multiple model support)
-model_options = {
-    "Gemma 3 (1B)": "google/gemma-3-1b-it", 
-    "Mistral (7B)": "mistralai/Mistral-7B-Instruct-v0.2",
-    "Flan T5 (Base)": "google/flan-t5-base"
-}
-selected_model = st.sidebar.selectbox("LLM Model", list(model_options.keys()))
-model_name = model_options[selected_model]
-
-# Main content area
-st.markdown("<div class='main-header'>Hybrid ML-LLM RAG System</div>", unsafe_allow_html=True)
-st.markdown("This system combines TF-IDF and dense vector embeddings with a language model to answer questions about your technical documents.")
-
-# Create tabs
-tab1, tab2, tab3, tab4 = st.tabs(["Upload & Process", "Query System", "Analysis", "Settings"])
-
-with tab1:
-    st.markdown("<div class='sub-header'>Document Processing</div>", unsafe_allow_html=True)
+# Setup tab
+with tabs[0]:
+    st.markdown('<p class="section-header">Setup & Process Documents</p>', unsafe_allow_html=True)
     
-    # Setup temporary directory for PDFs
-    pdf_dir = os.path.join(tempfile.gettempdir(), "hybrid_rag_pdfs")
-    os.makedirs(pdf_dir, exist_ok=True)
+    # PDF directory setup
+    st.markdown('<div class="highlight">', unsafe_allow_html=True)
+    st.markdown("### 1. PDF Directory Setup")
+    st.write(f"Current PDF directory: `{pdf_dir}`")
     
-    # Function to process files
-    def process_files():
-        if not uploaded_files:
-            st.error("Please upload at least one PDF file first.")
-            return
-            
-        # Save files to temp directory
-        for uploaded_file in uploaded_files:
-            file_path = os.path.join(pdf_dir, uploaded_file.name)
-            with open(file_path, 'wb') as f:
-                f.write(uploaded_file.getbuffer())
-        
-        # Create progress bar
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        # Status updates through a callback
-        def status_callback(message, progress):
-            status_text.text(message)
-            progress_bar.progress(progress)
-        
+    # Check if directory exists
+    if not os.path.exists(pdf_dir):
         try:
-            status_callback("Initializing RAG Bot...", 0.1)
-            
-            # Initialize RAG Bot
-            st.session_state.rag_bot = HybridRAGBot(
-                pdf_directory=pdf_dir,
-                model_name=model_name,
-                auth_token=hf_token,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap,
-                top_k=top_k
-            )
-            
-            # Override retriever weights
-            st.session_state.rag_bot.retriever.tfidf_weight = tfidf_weight
-            st.session_state.rag_bot.retriever.dense_weight = dense_weight
-            
-            status_callback("Processing documents...", 0.3)
-            
-            # Process documents
-            st.session_state.rag_bot.process_documents()
-            
-            status_callback("Processing complete!", 1.0)
-            st.session_state.processing_complete = True
-            
-            # Show summary
-            st.success(f"Successfully processed {len(uploaded_files)} PDF files")
-            st.info(f"Created {len(st.session_state.rag_bot.chunks)} chunks from the documents")
-            
-            # Display file summary
-            file_stats = {}
-            for chunk in st.session_state.rag_bot.chunks:
-                if chunk.source not in file_stats:
-                    file_stats[chunk.source] = {"chunks": 0, "pages": set()}
-                file_stats[chunk.source]["chunks"] += 1
-                file_stats[chunk.source]["pages"].add(chunk.page)
-            
-            # Create a DataFrame for file stats
-            stats_data = []
-            for filename, stats in file_stats.items():
-                stats_data.append({
-                    "Filename": filename,
-                    "Chunks": stats["chunks"],
-                    "Pages": len(stats["pages"])
-                })
-            
-            stats_df = pd.DataFrame(stats_data)
-            st.dataframe(stats_df)
-            
-            # Create a visualization of chunks per file
-            fig = px.bar(stats_df, x="Filename", y="Chunks", title="Number of Chunks per Document")
-            st.plotly_chart(fig)
-            
+            os.makedirs(pdf_dir)
+            st.success(f"Created directory: {pdf_dir}")
         except Exception as e:
-            st.error(f"Error during processing: {str(e)}")
-            status_callback("Error occurred during processing.", 0)
+            st.error(f"Error creating directory: {str(e)}")
     
-    # Save/Load Model
+    # Count PDFs in directory
+    pdf_files = []
+    pdf_stats = {"Total Files": 0, "Total Size (MB)": 0}
+    
+    if os.path.exists(pdf_dir):
+        for root, _, files in os.walk(pdf_dir):
+            for file in files:
+                if file.lower().endswith('.pdf'):
+                    file_path = os.path.join(root, file)
+                    file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
+                    pdf_files.append({"File": file, "Size (MB)": f"{file_size:.2f}"})
+                    pdf_stats["Total Files"] += 1
+                    pdf_stats["Total Size (MB)"] += file_size
+    
+    if pdf_files:
+        st.write(f"Found {pdf_stats['Total Files']} PDF files (Total: {pdf_stats['Total Size (MB)']:.2f} MB)")
+        st.dataframe(pd.DataFrame(pdf_files), use_container_width=True)
+    else:
+        st.warning(f"No PDF files found in {pdf_dir}. Please add PDFs to this directory.")
+    
+    # Upload PDFs directly through Streamlit
+    uploaded_pdfs = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
+    
+    if uploaded_pdfs:
+        for uploaded_pdf in uploaded_pdfs:
+            try:
+                # Save the uploaded file to the PDF directory
+                file_path = os.path.join(pdf_dir, uploaded_pdf.name)
+                with open(file_path, "wb") as f:
+                    f.write(uploaded_pdf.getbuffer())
+                st.success(f"Saved {uploaded_pdf.name} to {pdf_dir}")
+                
+                # Add to the list if not already there
+                if not any(pdf["File"] == uploaded_pdf.name for pdf in pdf_files):
+                    file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
+                    pdf_files.append({"File": uploaded_pdf.name, "Size (MB)": f"{file_size:.2f}"})
+                    pdf_stats["Total Files"] += 1
+                    pdf_stats["Total Size (MB)"] += file_size
+                
+                # Update the dataframe
+                st.dataframe(pd.DataFrame(pdf_files), use_container_width=True)
+            except Exception as e:
+                st.error(f"Error saving {uploaded_pdf.name}: {str(e)}")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Model initialization
+    st.markdown('<div class="highlight">', unsafe_allow_html=True)
+    st.markdown("### 2. Model Setup")
+    
+    # Load existing model if uploaded
+    if uploaded_model is not None:
+        try:
+            # Save the uploaded model to a temporary file
+            with open(save_filename, "wb") as f:
+                f.write(uploaded_model.getbuffer())
+            
+            # Load the model
+            rag_bot = HybridRAGBot.load(save_filename, pdf_directory=pdf_dir, auth_token=hf_token)
+            
+            st.session_state.rag_bot = rag_bot
+            st.session_state.model_loaded = True
+            
+            # Get document stats
+            st.session_state.document_stats = {
+                "Total Chunks": len(rag_bot.chunks),
+                "Unique Documents": len(set(chunk.source for chunk in rag_bot.chunks)),
+                "Processed": rag_bot.processed
+            }
+            
+            st.success(f"Successfully loaded model with {st.session_state.document_stats['Total Chunks']} chunks from {st.session_state.document_stats['Unique Documents']} documents")
+        except Exception as e:
+            st.error(f"Error loading model: {str(e)}")
+    
+    # Initialize new model
     col1, col2 = st.columns(2)
     
-    def save_model():
-        if st.session_state.rag_bot is None or not st.session_state.processing_complete:
-            st.error("Please process documents first before saving the model.")
-            return
-        
-        try:
-            # Save model to file
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.pkl') as tmp_file:
-                st.session_state.rag_bot.save(tmp_file.name)
-                
-                # Create download link
-                with open(tmp_file.name, 'rb') as f:
-                    model_bytes = f.read()
-                
-                b64 = base64.b64encode(model_bytes).decode()
-                href = f'<a href="data:file/pickle;base64,{b64}" download="hybrid_rag_model.pkl">Download Trained Model</a>'
-                st.markdown(href, unsafe_allow_html=True)
-                st.session_state.model_saved = True
-        except Exception as e:
-            st.error(f"Error saving model: {str(e)}")
-    
-    def load_model():
-        uploaded_model = st.file_uploader("Upload a saved model (.pkl file)", type=['pkl'])
-        if uploaded_model:
-            try:
-                # Save the uploaded model to a temp file
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pkl') as tmp_file:
-                    tmp_file.write(uploaded_model.getbuffer())
-                    model_path = tmp_file.name
-                
-                # Load the model
-                st.session_state.rag_bot = HybridRAGBot.load(model_path, auth_token=hf_token)
-                st.session_state.processing_complete = True
-                st.success("Model loaded successfully!")
-                
-                # Show model statistics
-                st.info(f"Model contains {len(st.session_state.rag_bot.chunks)} chunks from {len(set([chunk.source for chunk in st.session_state.rag_bot.chunks]))} documents")
-            except Exception as e:
-                st.error(f"Error loading model: {str(e)}")
-    
-    # Process and save/load buttons
     with col1:
-        if st.button("Process Documents", key="process_btn", use_container_width=True):
-            process_files()
+        initialize_button = st.button("Initialize New Model", use_container_width=True)
     
     with col2:
-        if st.button("Save Model", key="save_btn", disabled=(not st.session_state.processing_complete), use_container_width=True):
-            save_model()
-            
-    if not st.session_state.processing_complete:
-        with st.expander("Load Existing Model"):
-            load_model()
-
-with tab2:
-    st.markdown("<div class='sub-header'>Ask Questions</div>", unsafe_allow_html=True)
+        if st.session_state.rag_bot is not None:
+            save_button = st.button("Save Current Model", use_container_width=True)
+            if save_button:
+                try:
+                    if st.session_state.rag_bot.save(save_filename):
+                        st.success(f"Model saved to {save_filename}")
+                    else:
+                        st.error("Error saving model")
+                except Exception as e:
+                    st.error(f"Error saving model: {str(e)}")
     
-    if not st.session_state.processing_complete:
-        st.warning("Please process documents first in the 'Upload & Process' tab.")
+    if initialize_button:
+        try:
+            with st.spinner("Initializing new model..."):
+                # Initialize the RAG bot
+                rag_bot = HybridRAGBot(
+                    pdf_directory=pdf_dir,
+                    model_name=model_name,
+                    embedding_model=embedding_model,
+                    auth_token=hf_token,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    top_k=top_k
+                )
+                
+                st.session_state.rag_bot = rag_bot
+                st.session_state.model_loaded = True
+                st.success("Model initialized successfully")
+        except Exception as e:
+            st.error(f"Error initializing model: {str(e)}")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Process documents
+    st.markdown('<div class="highlight">', unsafe_allow_html=True)
+    st.markdown("### 3. Process Documents")
+    
+    if st.session_state.rag_bot is not None:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            process_button = st.button("Process Documents", use_container_width=True, 
+                                      disabled=st.session_state.is_processing)
+        
+        with col2:
+            force_reprocess = st.checkbox("Force Reprocessing", 
+                                         help="Process documents even if they have been processed before")
+        
+        if process_button:
+            st.session_state.is_processing = True
+            
+            try:
+                # Create a progress bar
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                # Process the documents
+                status_text.text("Processing documents...")
+                
+                # Since we can't modify the original code to report progress, 
+                # we'll use a simple animation to indicate processing
+                start_time = time.time()
+                
+                # We need to run the processing in the main thread since it's not safe to access TensorFlow/PyTorch models across threads
+                st.session_state.rag_bot.process_documents(force_reprocess=force_reprocess)
+                
+                # Get document stats
+                st.session_state.document_stats = {
+                    "Total Chunks": len(st.session_state.rag_bot.chunks),
+                    "Unique Documents": len(set(chunk.source for chunk in st.session_state.rag_bot.chunks)),
+                    "Processed": st.session_state.rag_bot.processed
+                }
+                
+                elapsed_time = time.time() - start_time
+                
+                # Update progress and status
+                progress_bar.progress(100)
+                status_text.text(f"Processing completed in {elapsed_time:.2f} seconds")
+                
+                # Display results
+                st.success(f"Successfully processed {st.session_state.document_stats['Unique Documents']} documents into {st.session_state.document_stats['Total Chunks']} chunks")
+                
+            except Exception as e:
+                st.error(f"Error processing documents: {str(e)}")
+            
+            finally:
+                st.session_state.is_processing = False
     else:
+        st.warning("Please initialize or load a model first")
+    
+    st.markdown('</div>', unsafe_allow_html=True)
+    
+    # Document stats
+    if st.session_state.document_stats:
+        st.markdown('<div class="info-box">', unsafe_allow_html=True)
+        st.markdown("### Document Statistics")
+        
+        # Format the stats
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Documents", st.session_state.document_stats["Unique Documents"])
+        col2.metric("Total Chunks", st.session_state.document_stats["Total Chunks"])
+        col3.metric("Processed", "Yes" if st.session_state.document_stats["Processed"] else "No")
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# Query tab
+with tabs[1]:
+    st.markdown('<p class="section-header">Query Documents</p>', unsafe_allow_html=True)
+    
+    if not st.session_state.model_loaded:
+        st.warning("Please load or initialize a model first in the Setup tab")
+    elif not st.session_state.document_stats or not st.session_state.document_stats.get("Processed", False):
+        st.warning("Please process documents first in the Setup tab")
+    else:
+        st.markdown('<div class="highlight">', unsafe_allow_html=True)
         # Query input
-        query = st.text_input("Ask a question about your documents:", key="query_input", 
-                             placeholder="e.g., What is quantum entanglement?")
+        query = st.text_area("Enter your question about the documents", 
+                            height=100, 
+                            placeholder="What is quantum entanglement?")
         
-        debug_mode = st.checkbox("Show detailed information about retrieved passages")
-        
-        if st.button("Submit Question", key="query_btn"):
+        # Query button
+        if st.button("Ask Question", use_container_width=True):
             if not query:
-                st.error("Please enter a question.")
+                st.warning("Please enter a question")
             else:
-                with st.spinner("Generating answer..."):
-                    try:
-                        # Time the query
+                try:
+                    with st.spinner("Generating answer..."):
                         start_time = time.time()
-                        result = st.session_state.rag_bot.answer_query(query)
-                        query_time = time.time() - start_time
                         
-                        # Store in history
-                        st.session_state.query_history.append({
+                        # Get answer from RAG bot
+                        result = st.session_state.rag_bot.answer_query(query)
+                        
+                        elapsed_time = time.time() - start_time
+                        
+                        # Add to query history
+                        query_item = {
                             "query": query,
                             "answer": result["answer"],
                             "sources": result["sources"],
-                            "time": query_time
-                        })
+                            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            "time_taken": f"{elapsed_time:.2f} sec"
+                        }
+                        st.session_state.query_history.append(query_item)
                         
-                        # Display the answer
+                        # Display answer
                         st.markdown("### Answer")
+                        st.markdown('<div class="success-box">', unsafe_allow_html=True)
                         st.markdown(result["answer"])
-                        st.info(f"Query processed in {query_time:.2f} seconds")
+                        st.markdown('</div>', unsafe_allow_html=True)
                         
                         # Display sources
                         st.markdown("### Sources")
+                        for i, source in enumerate(result["sources"]):
+                            with st.expander(f"Source {i+1}: {source['source']} (Page {source['page']})"):
+                                # Find the full chunk text
+                                chunk_text = "Source text not available"
+                                for chunk in st.session_state.rag_bot.chunks:
+                                    if (chunk.source == source["source"] and 
+                                        chunk.page == source["page"] and 
+                                        chunk.chunk_id == source["chunk_id"]):
+                                        chunk_text = chunk.text
+                                        break
+                                
+                                st.markdown(f"**Score:** {source['score']:.4f}")
+                                st.markdown(f"**Text:**\n{chunk_text}")
                         
-                        if debug_mode:
-                            for i, source in enumerate(result["sources"]):
-                                with st.expander(f"Source {i+1}: {source['source']} (Page {source['page']}) - Score: {source['score']:.4f}"):
-                                    # Find the chunk text
-                                    chunk_text = ""
-                                    for chunk in st.session_state.rag_bot.chunks:
-                                        if (chunk.source == source['source'] and 
-                                            chunk.page == source['page'] and 
-                                            chunk.chunk_id == source['chunk_id']):
-                                            chunk_text = chunk.text
-                                            break
-                                    
-                                    st.markdown(f"<div class='chunk-text'>{chunk_text}</div>", unsafe_allow_html=True)
-                        else:
-                            # Simple source display
-                            source_text = "<ul>"
-                            for source in result["sources"][:3]:  # Show first 3 sources
-                                source_text += f"<li>{source['source']} (Page {source['page']})</li>"
-                            source_text += "</ul>"
-                            st.markdown(source_text, unsafe_allow_html=True)
-                    
-                    except Exception as e:
-                        st.error(f"Error generating answer: {str(e)}")
+                        st.success(f"Query processed in {elapsed_time:.2f} seconds")
+                except Exception as e:
+                    st.error(f"Error processing query: {str(e)}")
         
-        # Display query history
-        if st.session_state.query_history:
-            st.markdown("### Query History")
-            for i, hist_item in enumerate(reversed(st.session_state.query_history[-5:])):  # Show last 5 queries
-                with st.expander(f"Q: {hist_item['query']}"):
-                    st.markdown(f"**Answer:** {hist_item['answer']}")
-                    st.markdown("**Sources:**")
-                    for source in hist_item['sources'][:3]:
-                        st.markdown(f"- {source['source']} (Page {source['page']})")
-                    st.text(f"Time: {hist_item['time']:.2f} seconds")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-with tab3:
-    st.markdown("<div class='sub-header'>System Analysis</div>", unsafe_allow_html=True)
+# Document Explorer tab
+with tabs[2]:
+    st.markdown('<p class="section-header">Document Explorer</p>', unsafe_allow_html=True)
     
-    if not st.session_state.processing_complete:
-        st.warning("Please process documents first in the 'Upload & Process' tab.")
+    if not st.session_state.model_loaded or not st.session_state.document_stats:
+        st.warning("Please load or initialize a model first in the Setup tab")
     else:
-        # Create subtabs for different analyses
-        analysis_tab1, analysis_tab2, analysis_tab3 = st.tabs(["Document Analysis", "Retrieval Performance", "Query Analysis"])
+        st.markdown('<div class="highlight">', unsafe_allow_html=True)
         
-        with analysis_tab1:
-            st.markdown("### Document Statistics")
+        # Get unique documents
+        if st.session_state.rag_bot and st.session_state.rag_bot.chunks:
+            unique_docs = sorted(set(chunk.source for chunk in st.session_state.rag_bot.chunks))
             
-            # Get document statistics
-            doc_sources = [chunk.source for chunk in st.session_state.rag_bot.chunks]
-            doc_pages = [chunk.page for chunk in st.session_state.rag_bot.chunks]
+            # Document selector
+            selected_doc = st.selectbox("Select Document", unique_docs)
             
-            # Count chunks per document
-            doc_counts = pd.Series(doc_sources).value_counts().reset_index()
-            doc_counts.columns = ["Document", "Number of Chunks"]
-            
-            # Plot document distribution
-            fig1 = px.bar(doc_counts, x="Document", y="Number of Chunks", 
-                         title="Distribution of Chunks Across Documents")
-            st.plotly_chart(fig1, use_container_width=True)
-            
-            # Count chunks per page
-            page_data = pd.DataFrame({
-                "Document": doc_sources,
-                "Page": doc_pages
-            })
-            page_counts = page_data.groupby(["Document", "Page"]).size().reset_index()
-            page_counts.columns = ["Document", "Page", "Number of Chunks"]
-            
-            # Plot page distribution for the document with most pages
-            top_doc = doc_counts.iloc[0]["Document"]
-            doc_page_data = page_counts[page_counts["Document"] == top_doc]
-            
-            fig2 = px.bar(doc_page_data, x="Page", y="Number of Chunks", 
-                         title=f"Chunks Per Page for {top_doc}")
-            st.plotly_chart(fig2, use_container_width=True)
-            
-            # Display avg chunks per document
-            st.metric("Average Chunks per Document", 
-                     f"{len(st.session_state.rag_bot.chunks) / len(doc_counts):.1f}")
+            if selected_doc:
+                # Get pages in the document
+                doc_pages = sorted(set(chunk.page for chunk in st.session_state.rag_bot.chunks 
+                                    if chunk.source == selected_doc))
+                
+                # Page selector
+                selected_page = st.selectbox("Select Page", doc_pages)
+                
+                if selected_page:
+                    # Get chunks for this page
+                    page_chunks = [chunk for chunk in st.session_state.rag_bot.chunks 
+                                  if chunk.source == selected_doc and chunk.page == selected_page]
+                    
+                    # Display chunks
+                    st.markdown(f"### Document: {selected_doc}, Page: {selected_page}")
+                    st.write(f"Found {len(page_chunks)} chunks on this page")
+                    
+                    for i, chunk in enumerate(page_chunks):
+                        with st.expander(f"Chunk {i+1} (ID: {chunk.chunk_id})"):
+                            st.markdown(chunk.text)
+        else:
+            st.warning("No document chunks available. Please process documents first.")
         
-        with analysis_tab2:
-            st.markdown("### Retrieval Analysis")
-            
-            # Compare different retrieval methods
-            st.markdown("#### Retrieval Comparison")
-            
-            test_query = st.text_input("Enter a test query:", "What is quantum entanglement?", 
-                                      key="test_query_input")
-            
-            if st.button("Compare Retrieval Methods", key="compare_btn"):
-                with st.spinner("Comparing retrieval methods..."):
-                    try:
-                        # Get results from TF-IDF
-                        tfidf_results = st.session_state.rag_bot.retriever.tfidf_retriever.query(test_query, top_k=3)
-                        
-                        # Get results from Dense
-                        dense_results = st.session_state.rag_bot.retriever.dense_retriever.query(test_query, top_k=3)
-                        
-                        # Get results from Hybrid
-                        hybrid_results = st.session_state.rag_bot.retriever.query(test_query, top_k=3)
-                        
-                        # Display comparison
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            st.markdown("**TF-IDF Results**")
-                            for i, (chunk, score) in enumerate(tfidf_results):
-                                st.markdown(f"{i+1}. {chunk.source} (Page {chunk.page})")
-                                st.progress(float(score))
-                        
-                        with col2:
-                            st.markdown("**Dense Embedding Results**")
-                            for i, (chunk, score) in enumerate(dense_results):
-                                st.markdown(f"{i+1}. {chunk.source} (Page {chunk.page})")
-                                st.progress(float(score))
-                        
-                        with col3:
-                            st.markdown("**Hybrid Results**")
-                            for i, (chunk, score) in enumerate(hybrid_results):
-                                st.markdown(f"{i+1}. {chunk.source} (Page {chunk.page})")
-                                st.progress(float(score))
-                        
-                        # Calculate overlap
-                        tfidf_ids = set([(chunk.source, chunk.page) for chunk, _ in tfidf_results])
-                        dense_ids = set([(chunk.source, chunk.page) for chunk, _ in dense_results])
-                        hybrid_ids = set([(chunk.source, chunk.page) for chunk, _ in hybrid_results])
-                        
-                        # Overlap metrics
-                        tfidf_dense_overlap = len(tfidf_ids.intersection(dense_ids))
-                        tfidf_hybrid_overlap = len(tfidf_ids.intersection(hybrid_ids))
-                        dense_hybrid_overlap = len(dense_ids.intersection(hybrid_ids))
-                        
-                        # Display metrics
-                        metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
-                        metrics_col1.metric("TF-IDF/Dense Overlap", f"{tfidf_dense_overlap}/3")
-                        metrics_col2.metric("TF-IDF/Hybrid Overlap", f"{tfidf_hybrid_overlap}/3")
-                        metrics_col3.metric("Dense/Hybrid Overlap", f"{dense_hybrid_overlap}/3")
-                    
-                    except Exception as e:
-                        st.error(f"Error comparing retrieval methods: {str(e)}")
-        
-        with analysis_tab3:
-            st.markdown("### Query Analysis")
-            
-            if not st.session_state.query_history:
-                st.info("No queries have been made yet. Ask some questions in the Query tab.")
-            else:
-                # Analyze query performance
-                query_data = pd.DataFrame(st.session_state.query_history)
-                
-                # Query response time
-                fig3 = px.line(query_data, y="time", title="Query Response Time", 
-                              labels={"index": "Query Number", "time": "Time (seconds)"})
-                st.plotly_chart(fig3, use_container_width=True)
-                
-                # Display metrics
-                avg_time = query_data["time"].mean()
-                st.metric("Average Response Time", f"{avg_time:.2f} seconds")
-                
-                # Export results
-                if st.button("Export Query History", key="export_btn"):
-                    # Create a dataframe with simplified sources
-                    export_data = []
-                    for item in st.session_state.query_history:
-                        export_data.append({
-                            "Query": item["query"],
-                            "Answer": item["answer"],
-                            "Sources": ", ".join([f"{s['source']} (Page {s['page']})" for s in item["sources"][:3]]),
-                            "Time (seconds)": item["time"]
-                        })
-                    
-                    export_df = pd.DataFrame(export_data)
-                    
-                    # Convert to CSV string
-                    csv = export_df.to_csv(index=False)
-                    b64 = base64.b64encode(csv.encode()).decode()
-                    href = f'<a href="data:file/csv;base64,{b64}" download="query_history.csv">Download Query History CSV</a>'
-                    st.markdown(href, unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
 
-with tab4:
-    st.markdown("<div class='sub-header'>Advanced Settings</div>", unsafe_allow_html=True)
+# Query History tab
+with tabs[3]:
+    st.markdown('<p class="section-header">Query History</p>', unsafe_allow_html=True)
     
-    # Advanced settings for retrieval and processing
-    st.markdown("### Retrieval Settings")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("#### TF-IDF Settings")
-        use_svd = st.checkbox("Use SVD for dimensionality reduction", value=True)
-        n_components = st.slider("SVD Components", 50, 500, 100, 10, 
-                                disabled=not use_svd)
-        min_df = st.slider("Minimum Document Frequency", 1, 10, 2, 1)
-        max_df = st.slider("Maximum Document Frequency", 0.5, 1.0, 0.95, 0.05)
-    
-    with col2:
-        st.markdown("#### Dense Retriever Settings")
-        embedding_models = {
-            "MiniLM (Small, Fast)": "all-MiniLM-L6-v2",
-            "MPNet (Medium, Balanced)": "all-mpnet-base-v2",
-            "MiniLM (Multilingual)": "paraphrase-multilingual-MiniLM-L12-v2"
-        }
-        embedding_model = st.selectbox("Embedding Model", list(embedding_models.keys()))
-        batch_size = st.slider("Embedding Batch Size", 16, 128, 64, 8)
-    
-    st.markdown("### Processing Settings")
-    
-    max_workers = st.slider("Parallel Processing Workers", 1, 8, 4, 1)
-    
-    if st.button("Apply Settings", key="apply_settings"):
-        st.session_state.new_settings = {
-            "use_svd": use_svd,
-            "n_components": n_components,
-            "min_df": min_df,
-            "max_df": max_df,
-            "embedding_model": embedding_models[embedding_model],
-            "batch_size": batch_size,
-            "max_workers": max_workers
-        }
-        st.success("Settings saved. They will be applied when you process documents again.")
+    if st.session_state.query_history:
+        st.markdown('<div class="highlight">', unsafe_allow_html=True)
+        
+        # Display history in reverse order (newest first)
+        for i, item in enumerate(reversed(st.session_state.query_history)):
+            with st.expander(f"Query {len(st.session_state.query_history) - i}: {item['query']} ({item['timestamp']})"):
+                st.markdown(f"**Time taken:** {item['time_taken']}")
+                st.markdown("**Answer:**")
+                st.markdown(item['answer'])
+                
+                st.markdown("**Sources:**")
+                sources_df = pd.DataFrame([
+                    {"Document": s['source'], "Page": s['page'], "Score": f"{s['score']:.4f}"}
+                    for s in item['sources']
+                ])
+                st.dataframe(sources_df, use_container_width=True)
+        
+        # Clear history button
+        if st.button("Clear Query History"):
+            st.session_state.query_history = []
+            st.experimental_rerun()
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.info("No queries yet. Ask questions in the 'Query Documents' tab to build history.")
 
 # Footer
 st.markdown("---")
-st.markdown("Hybrid ML-LLM RAG System | Built for processing large technical PDFs")
-
-
-# Run the application with: streamlit run streamlit_app.py
+st.markdown("""
+<div style="text-align: center">
+    <p>Hybrid ML-LLM RAG System for Large Technical PDFs</p>
+    <p>Features: Hybrid Retrieval (TF-IDF + Dense Embeddings), Technical Content Chunking, Gemma 3 Generation</p>
+</div>
+""", unsafe_allow_html=True)
