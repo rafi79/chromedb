@@ -121,7 +121,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
+# Initialize session state variables BEFORE usage
 if "rag_bot" not in st.session_state:
     st.session_state.rag_bot = None
 if "processed" not in st.session_state:
@@ -129,83 +129,25 @@ if "processed" not in st.session_state:
 if "pdf_files" not in st.session_state:
     st.session_state.pdf_files = []
 if "temp_dir" not in st.session_state:
-    st.session_state.temp_dir = None
+    st.session_state.temp_dir = tempfile.mkdtemp()
 if "query_history" not in st.session_state:
     st.session_state.query_history = []
 if "processing_status" not in st.session_state:
     st.session_state.processing_status = None
-if "processing_message" not in st.session_state:
-    st.session_state.processing_message = ""
-if "processing_progress" not in st.session_state:
-    st.session_state.processing_progress = 0
 if "doc_stats" not in st.session_state:
     st.session_state.doc_stats = None
-
-# Background processing function
-def process_documents_thread(temp_dir, status_queue, progress_queue):
-    try:
-        # Create RAG bot
-        rag_bot = EnhancedHybridRAGBot(
-            pdf_directory=temp_dir,
-            auth_token=st.session_state.hf_token,
-            chunk_size=st.session_state.chunk_size,
-            chunk_overlap=st.session_state.chunk_overlap,
-            top_k=st.session_state.top_k
-        )
-        
-        # Process documents
-        status_queue.put("Extracting text from PDFs...")
-        progress_queue.put(0.2)
-        
-        rag_bot.process_documents()
-        progress_queue.put(0.8)
-        
-        # Calculate document statistics
-        doc_stats = {}
-        doc_stats["total_chunks"] = len(rag_bot.chunks) if hasattr(rag_bot, 'chunks') else 0
-        
-        # Count documents and pages
-        sources = {}
-        total_pages = 0
-        if hasattr(rag_bot, 'chunks'):
-            for chunk in rag_bot.chunks:
-                if chunk.source not in sources:
-                    sources[chunk.source] = set()
-                sources[chunk.source].add(chunk.page)
-                total_pages = max(total_pages, chunk.page)
-        
-        doc_stats["total_documents"] = len(sources)
-        doc_stats["total_pages"] = sum([len(pages) for pages in sources.values()])
-        
-        # Calculate average chunks per document
-        if doc_stats["total_documents"] > 0:
-            doc_stats["avg_chunks_per_doc"] = doc_stats["total_chunks"] / doc_stats["total_documents"]
-        else:
-            doc_stats["avg_chunks_per_doc"] = 0
-            
-        # Get document titles
-        doc_stats["document_titles"] = []
-        if hasattr(rag_bot, 'chunks'):
-            for chunk in rag_bot.chunks:
-                if hasattr(chunk, 'title'):
-                    doc_stats["document_titles"].append(chunk.title)
-        doc_stats["document_titles"] = list(set(doc_stats["document_titles"]))
-        
-        # Save to session state
-        status_queue.put("Finalizing...")
-        progress_queue.put(0.9)
-        
-        status_queue.put("complete")
-        progress_queue.put(1.0)
-        
-        # Return the RAG bot and stats
-        return rag_bot, doc_stats
-        
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        status_queue.put(f"Error: {str(e)}")
-        return None, None
+if "hf_token" not in st.session_state:
+    st.session_state.hf_token = HF_TOKEN
+if "model" not in st.session_state:
+    st.session_state.model = MODEL_NAME
+if "chunk_size" not in st.session_state:
+    st.session_state.chunk_size = CHUNK_SIZE
+if "chunk_overlap" not in st.session_state:
+    st.session_state.chunk_overlap = CHUNK_OVERLAP
+if "top_k" not in st.session_state:
+    st.session_state.top_k = 5
+if "processing_result" not in st.session_state:
+    st.session_state.processing_result = None
 
 def format_answer_html(result):
     """Format the answer with citation highlights in HTML."""
@@ -344,20 +286,97 @@ def save_answer_as_pdf(result):
         st.error(f"Error creating PDF: {str(e)}")
         return None
 
+def process_documents(temp_dir):
+    """Process documents directly, without threading"""
+    try:
+        # Create status placeholders
+        status_text = st.empty()
+        progress_bar = st.progress(0)
+        
+        status_text.text("Initializing RAG system...")
+        progress_bar.progress(0.1)
+        
+        # Create RAG bot
+        rag_bot = EnhancedHybridRAGBot(
+            pdf_directory=temp_dir,
+            auth_token=st.session_state.hf_token,
+            chunk_size=st.session_state.chunk_size,
+            chunk_overlap=st.session_state.chunk_overlap,
+            top_k=st.session_state.top_k
+        )
+        
+        # Process documents
+        status_text.text("Extracting text from PDFs...")
+        progress_bar.progress(0.2)
+        
+        rag_bot.process_documents()
+        progress_bar.progress(0.8)
+        
+        # Calculate document statistics
+        status_text.text("Calculating document statistics...")
+        doc_stats = {}
+        doc_stats["total_chunks"] = len(rag_bot.chunks) if hasattr(rag_bot, 'chunks') else 0
+        
+        # Count documents and pages
+        sources = {}
+        total_pages = 0
+        if hasattr(rag_bot, 'chunks'):
+            for chunk in rag_bot.chunks:
+                if chunk.source not in sources:
+                    sources[chunk.source] = set()
+                sources[chunk.source].add(chunk.page)
+                total_pages = max(total_pages, chunk.page)
+        
+        doc_stats["total_documents"] = len(sources)
+        doc_stats["total_pages"] = sum([len(pages) for pages in sources.values()])
+        
+        # Calculate average chunks per document
+        if doc_stats["total_documents"] > 0:
+            doc_stats["avg_chunks_per_doc"] = doc_stats["total_chunks"] / doc_stats["total_documents"]
+        else:
+            doc_stats["avg_chunks_per_doc"] = 0
+            
+        # Get document titles
+        doc_stats["document_titles"] = []
+        if hasattr(rag_bot, 'chunks'):
+            for chunk in rag_bot.chunks:
+                if hasattr(chunk, 'title'):
+                    doc_stats["document_titles"].append(chunk.title)
+        doc_stats["document_titles"] = list(set(doc_stats["document_titles"]))
+        
+        status_text.text("Processing complete!")
+        progress_bar.progress(1.0)
+        
+        # Save to session state
+        st.session_state.rag_bot = rag_bot
+        st.session_state.doc_stats = doc_stats
+        st.session_state.processed = True
+        
+        # Clear progress elements after a short delay
+        time.sleep(1)
+        status_text.empty()
+        progress_bar.empty()
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"Error processing documents: {str(e)}")
+        return False
+
 # Sidebar for settings
 with st.sidebar:
     st.title("📚 Enhanced RAG System")
     st.subheader("Settings")
     
     # Model settings
-    st.session_state.hf_token = st.text_input("Hugging Face Token", value=HF_TOKEN, type="password")
+    st.session_state.hf_token = st.text_input("Hugging Face Token", value=st.session_state.hf_token, type="password")
     model_options = ["google/gemma-3-1b-it", "google/gemma-3-2b", "google/gemma-3-8b-it"]
     st.session_state.model = st.selectbox("LLM Model", model_options, index=0)
     
     # Processing settings
-    st.session_state.chunk_size = st.slider("Chunk Size", 500, 2000, CHUNK_SIZE, 100)
-    st.session_state.chunk_overlap = st.slider("Chunk Overlap", 0, 500, CHUNK_OVERLAP, 50)
-    st.session_state.top_k = st.slider("Top K Results", 3, 10, 5, 1)
+    st.session_state.chunk_size = st.slider("Chunk Size", 500, 2000, st.session_state.chunk_size, 100)
+    st.session_state.chunk_overlap = st.slider("Chunk Overlap", 0, 500, st.session_state.chunk_overlap, 50)
+    st.session_state.top_k = st.slider("Top K Results", 3, 10, st.session_state.top_k, 1)
     
     st.markdown("---")
     
@@ -440,10 +459,6 @@ if not RAG_SYSTEM_AVAILABLE:
 uploaded_files = st.file_uploader("Upload PDF Documents", type="pdf", accept_multiple_files=True)
 
 if uploaded_files:
-    # Create a temporary directory to store the uploaded PDFs
-    if not st.session_state.temp_dir:
-        st.session_state.temp_dir = tempfile.mkdtemp()
-    
     # Save uploaded files to temp directory
     st.session_state.pdf_files = []
     for uploaded_file in uploaded_files:
@@ -459,71 +474,11 @@ if uploaded_files:
         # Process button
         if not st.session_state.processed:
             if st.button("Process Documents"):
-                # Create progress elements
-                status_text = st.empty()
-                progress_bar = st.progress(0)
-                
-                # Set up queues for communication
-                status_queue = queue.Queue()
-                progress_queue = queue.Queue()
-                
-                # Start background thread
-                thread = threading.Thread(
-                    target=lambda: setattr(
-                        st.session_state, 
-                        'processing_result', 
-                        process_documents_thread(
-                            st.session_state.temp_dir, 
-                            status_queue, 
-                            progress_queue
-                        )
-                    )
-                )
-                thread.start()
-                
-                # Monitor progress
-                while thread.is_alive():
-                    # Check for status updates
-                    try:
-                        while not status_queue.empty():
-                            status = status_queue.get_nowait()
-                            if status == "complete":
-                                st.session_state.processing_status = "complete"
-                            else:
-                                status_text.text(f"Processing: {status}")
-                    except queue.Empty:
-                        pass
-                    
-                    # Check for progress updates
-                    try:
-                        while not progress_queue.empty():
-                            progress = progress_queue.get_nowait()
-                            progress_bar.progress(progress)
-                    except queue.Empty:
-                        pass
-                    
-                    time.sleep(0.1)
-                
-                # Processing complete
-                thread.join()
-                
-                if st.session_state.processing_status == "complete":
-                    rag_bot, doc_stats = st.session_state.processing_result
-                    if rag_bot:
-                        st.session_state.rag_bot = rag_bot
-                        st.session_state.doc_stats = doc_stats
-                        st.session_state.processed = True
-                        
-                        # Clear progress elements
-                        status_text.empty()
-                        progress_bar.empty()
-                        
-                        # Display success and reload page
-                        st.success("✅ Documents processed successfully!")
-                        st.experimental_rerun()
-                    else:
-                        status_text.error("❌ Processing failed. Please check logs.")
-                        progress_bar.empty()
+                # Process documents directly without threading
+                success = process_documents(st.session_state.temp_dir)
+                if success:
+                    st.success("✅ Documents processed successfully!")
+                    st.experimental_rerun()
 
 # Main query interface (if documents are processed)
 if st.session_state.processed and st.session_state.rag_bot:
@@ -562,22 +517,25 @@ if st.session_state.processed and st.session_state.rag_bot:
         
         with source_cols[1]:
             if 'sources' in result and result['sources']:
-                # Create a simple chart of source relevance
-                source_names = [s.get('title', s['source']) for s in result['sources'][:5]]
-                source_scores = [s['score'] for s in result['sources'][:5]]
-                
-                # Create a DataFrame for the chart
-                chart_data = pd.DataFrame({
-                    'Source': source_names,
-                    'Relevance': source_scores
-                })
-                
-                # Create bar chart
-                fig, ax = plt.subplots(figsize=(5, 3))
-                sns.barplot(x='Relevance', y='Source', data=chart_data, ax=ax, palette='viridis')
-                ax.set_title('Source Relevance Scores')
-                ax.set_xlim(0, 1)
-                st.pyplot(fig)
+                try:
+                    # Create a simple chart of source relevance
+                    source_names = [s.get('title', s['source']) for s in result['sources'][:5]]
+                    source_scores = [s['score'] for s in result['sources'][:5]]
+                    
+                    # Create a DataFrame for the chart
+                    chart_data = pd.DataFrame({
+                        'Source': source_names,
+                        'Relevance': source_scores
+                    })
+                    
+                    # Create bar chart
+                    fig, ax = plt.subplots(figsize=(5, 3))
+                    sns.barplot(x='Relevance', y='Source', data=chart_data, ax=ax, palette='viridis')
+                    ax.set_title('Source Relevance Scores')
+                    ax.set_xlim(0, 1)
+                    st.pyplot(fig)
+                except Exception as e:
+                    st.warning(f"Could not create visualization: {str(e)}")
         
         # Export options
         st.markdown("### Export")
@@ -620,5 +578,3 @@ if st.session_state.query_history:
             st.markdown(f"**Q{i+1}: {result['query']}**")
             st.markdown(f"<div style='background-color: #f0f0f0; padding: 10px; border-radius: 5px; margin-bottom: 10px;'>{result['answer'][:200]}...</div>", unsafe_allow_html=True)
             st.markdown("---")
-
-# Run the app with: streamlit run app.py
