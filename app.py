@@ -1,4 +1,13 @@
+# Set page config must be the first Streamlit command
 import streamlit as st
+st.set_page_config(
+    page_title="Enhanced RAG System",
+    page_icon="📚",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Now import other libraries
 import os
 import time
 import pandas as pd
@@ -10,32 +19,59 @@ import tempfile
 import threading
 import queue
 import io
+import sys
 
-# Import from your existing system - adjust import paths as needed
-# You might need to place this script in the same directory as your main code
-# or adjust the import paths accordingly
+# Define placeholders for missing modules
+HF_TOKEN = "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"
+MODEL_NAME = "google/gemma-3-1b-it"
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+CHUNK_SIZE = 1000
+CHUNK_OVERLAP = 200
+
+# Create dummy classes to allow the app to load even without the proper imports
+class DummyDocumentChunk:
+    def __init__(self, text="", source="", page=0, chunk_id=0):
+        self.text = text
+        self.source = source
+        self.page = page
+        self.chunk_id = chunk_id
+        self.title = "Unknown"
+        self.author = "Unknown"
+
+class DummyHybridRAGBot:
+    def __init__(self, **kwargs):
+        self.chunks = []
+        self.processed = True
+    
+    def process_documents(self):
+        st.warning("Using dummy RAG bot - no actual processing performed")
+        time.sleep(2)
+        return True
+    
+    def answer_query(self, query):
+        return {
+            "query": query,
+            "answer": "This is a placeholder answer. The actual RAG system is not available.\n\n1. Please ensure the hybrid_rag_system.py file is in the same directory as this app.\n2. Check that all dependencies are installed.\n3. Make sure the EnhancedHybridRAGBot class is properly implemented.",
+            "sources": [
+                {"source": "placeholder.pdf", "page": 1, "chunk_id": 0, "score": 0.95, 
+                 "title": "Placeholder Document", "author": "System"}
+            ]
+        }
+
+# Try to import the actual RAG system
 try:
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
     from hybrid_rag_system import (
         EnhancedHybridRAGBot, HF_TOKEN, MODEL_NAME, EMBEDDING_MODEL_NAME, 
         CHUNK_SIZE, CHUNK_OVERLAP
     )
-except ImportError:
-    # Fallback imports for demonstration
-    st.error("Failed to import from hybrid_rag_system. Using placeholder values.")
-    HF_TOKEN = "your_default_token"
-    MODEL_NAME = "google/gemma-3-1b-it"
-    EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
-    CHUNK_SIZE = 1000
-    CHUNK_OVERLAP = 200
-    # You'll need to add code for EnhancedHybridRAGBot class here or adjust imports
-
-# Set page config
-st.set_page_config(
-    page_title="Enhanced RAG System",
-    page_icon="📚",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+    RAG_SYSTEM_AVAILABLE = True
+    st.sidebar.success("✅ RAG system imported successfully")
+except ImportError as e:
+    RAG_SYSTEM_AVAILABLE = False
+    EnhancedHybridRAGBot = DummyHybridRAGBot
+    st.sidebar.error(f"⚠️ Failed to import RAG system: {str(e)}")
+    st.sidebar.info("Using placeholder functionality. Upload the appropriate files to enable full functionality.")
 
 # Custom CSS
 st.markdown("""
@@ -126,16 +162,17 @@ def process_documents_thread(temp_dir, status_queue, progress_queue):
         
         # Calculate document statistics
         doc_stats = {}
-        doc_stats["total_chunks"] = len(rag_bot.chunks)
+        doc_stats["total_chunks"] = len(rag_bot.chunks) if hasattr(rag_bot, 'chunks') else 0
         
         # Count documents and pages
         sources = {}
         total_pages = 0
-        for chunk in rag_bot.chunks:
-            if chunk.source not in sources:
-                sources[chunk.source] = set()
-            sources[chunk.source].add(chunk.page)
-            total_pages = max(total_pages, chunk.page)
+        if hasattr(rag_bot, 'chunks'):
+            for chunk in rag_bot.chunks:
+                if chunk.source not in sources:
+                    sources[chunk.source] = set()
+                sources[chunk.source].add(chunk.page)
+                total_pages = max(total_pages, chunk.page)
         
         doc_stats["total_documents"] = len(sources)
         doc_stats["total_pages"] = sum([len(pages) for pages in sources.values()])
@@ -148,9 +185,10 @@ def process_documents_thread(temp_dir, status_queue, progress_queue):
             
         # Get document titles
         doc_stats["document_titles"] = []
-        for chunk in rag_bot.chunks:
-            if hasattr(chunk, 'title'):
-                doc_stats["document_titles"].append(chunk.title)
+        if hasattr(rag_bot, 'chunks'):
+            for chunk in rag_bot.chunks:
+                if hasattr(chunk, 'title'):
+                    doc_stats["document_titles"].append(chunk.title)
         doc_stats["document_titles"] = list(set(doc_stats["document_titles"]))
         
         # Save to session state
@@ -164,6 +202,8 @@ def process_documents_thread(temp_dir, status_queue, progress_queue):
         return rag_bot, doc_stats
         
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         status_queue.put(f"Error: {str(e)}")
         return None, None
 
@@ -340,8 +380,7 @@ with st.sidebar:
                         st.write(f"• {title}")
     
     st.markdown("---")
-    st.markdown("Developed by Your Name")
-    st.markdown("Version 1.0.0")
+    st.markdown("Enhanced RAG System v1.0.0")
 
 # Main content
 st.title("Enhanced RAG System with Citations")
@@ -349,6 +388,53 @@ st.markdown("""
 This application uses a hybrid machine learning approach to answer questions based on your PDF documents.
 Upload your PDFs, process them, and ask questions to get cited answers from your documents.
 """)
+
+# Check if RAG System is available
+if not RAG_SYSTEM_AVAILABLE:
+    st.warning("""
+    ⚠️ The RAG system module was not found. You have two options:
+    
+    1. **Upload the RAG system code**: Place your `hybrid_rag_system.py` file in the same directory as this app.
+    
+    2. **Copy and paste implementation**: Paste your RAG system code in the text area below to create a temporary implementation.
+    """)
+    
+    rag_code = st.text_area(
+        "Paste your RAG system code here (optional):",
+        height=200,
+        help="This will create a temporary implementation in memory."
+    )
+    
+    if rag_code and st.button("Use this code"):
+        try:
+            # Create a temporary module with the provided code
+            import types
+            module = types.ModuleType("temp_rag_system")
+            exec(rag_code, module.__dict__)
+            
+            # Try to extract the needed classes and variables
+            if hasattr(module, "EnhancedHybridRAGBot"):
+                EnhancedHybridRAGBot = module.EnhancedHybridRAGBot
+                RAG_SYSTEM_AVAILABLE = True
+                
+                # Try to get other variables
+                if hasattr(module, "HF_TOKEN"):
+                    HF_TOKEN = module.HF_TOKEN
+                if hasattr(module, "MODEL_NAME"):
+                    MODEL_NAME = module.MODEL_NAME
+                if hasattr(module, "EMBEDDING_MODEL_NAME"):
+                    EMBEDDING_MODEL_NAME = module.EMBEDDING_MODEL_NAME
+                if hasattr(module, "CHUNK_SIZE"):
+                    CHUNK_SIZE = module.CHUNK_SIZE
+                if hasattr(module, "CHUNK_OVERLAP"):
+                    CHUNK_OVERLAP = module.CHUNK_OVERLAP
+                
+                st.success("RAG system code loaded successfully!")
+                st.experimental_rerun()
+            else:
+                st.error("The provided code does not contain the 'EnhancedHybridRAGBot' class.")
+        except Exception as e:
+            st.error(f"Error loading code: {str(e)}")
 
 # File uploader
 uploaded_files = st.file_uploader("Upload PDF Documents", type="pdf", accept_multiple_files=True)
