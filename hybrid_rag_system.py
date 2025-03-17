@@ -774,4 +774,254 @@ class HybridRAGBot:
         start_time = time.time()
         logger.info(f"Processing documents from {self.pdf_directory}...")
         
-        self.chunks = self.pdf_processor.process_directory(self.
+        self.chunks = self.pdf_processor.process_directory(self.pdf_directory)
+        
+        if not self.chunks:
+            logger.error("No document chunks were created. Check if PDFs exist and are readable.")
+            return
+        
+        # Train retriever
+        logger.info("Training retriever models...")
+        self.retriever.fit(self.chunks)
+        
+        self.processed = True
+        elapsed = time.time() - start_time
+        logger.info(f"Document processing completed in {elapsed:.2f} seconds")
+    
+    def answer_query(self, query: str) -> Dict[str, Any]:
+        """Answer a query using the RAG pipeline."""
+        if not self.processed:
+            logger.error("Documents not processed yet. Call process_documents() first.")
+            return {
+                "query": query,
+                "answer": "Documents not processed yet. Please process documents first.",
+                "sources": []
+            }
+        
+        try:
+            # Retrieve relevant chunks
+            logger.info(f"Processing query: {query}")
+            context_chunks = self.retriever.query(query, self.top_k)
+            
+            if not context_chunks:
+                return {
+                    "query": query,
+                    "answer": "No relevant information found in the documents.",
+                    "sources": []
+                }
+            
+            # Format sources for return
+            sources = []
+            for chunk, score in context_chunks:
+                sources.append({
+                    "source": chunk.source,
+                    "page": chunk.page,
+                    "chunk_id": chunk.chunk_id,
+                    "score": score
+                })
+            
+            # Generate answer
+            answer = self.generator.generate(query, context_chunks)
+            
+            return {
+                "query": query,
+                "answer": answer,
+                "sources": sources
+            }
+            
+        except Exception as e:
+            logger.error(f"Error answering query: {str(e)}")
+            return {
+                "query": query,
+                "answer": f"Error processing query: {str(e)}",
+                "sources": []
+            }
+    
+    def save(self, filepath: str):
+        """Save the processed model for later use."""
+        if not self.processed:
+            logger.error("Cannot save unprocessed model. Process documents first.")
+            return False
+        
+        try:
+            # Create a representation without the actual models
+            save_dict = {
+                "chunks": self.chunks,
+                "tfidf_vectorizer": self.retriever.tfidf_retriever.vectorizer if hasattr(self.retriever.tfidf_retriever, 'vectorizer') else None,
+                "tfidf_svd": self.retriever.tfidf_retriever.svd if hasattr(self.retriever.tfidf_retriever, 'svd') else None,
+                "tfidf_document_vectors": self.retriever.tfidf_retriever.document_vectors if hasattr(self.retriever.tfidf_retriever, 'document_vectors') else None,
+                "dense_embeddings": self.retriever.dense_retriever.embeddings if hasattr(self.retriever.dense_retriever, 'embeddings') else None,
+                "processed": self.processed,
+                "top_k": self.top_k,
+                "model_name": self.generator.model_name
+            }
+            
+            logger.info(f"Saving model to {filepath}...")
+            with open(filepath, 'wb') as f:
+                pickle.dump(save_dict, f)
+            
+            logger.info("Model saved successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error saving model: {str(e)}")
+            return False
+    
+    @classmethod
+    def load(cls, filepath: str, pdf_directory: str = PDF_DIRECTORY, 
+             auth_token: Optional[str] = HF_TOKEN) -> 'HybridRAGBot':
+        """Load a previously saved model."""
+        try:
+            logger.info(f"Loading model from {filepath}...")
+            with open(filepath, 'rb') as f:
+                save_dict = pickle.load(f)
+            
+            # Create a new instance
+            rag_bot = cls(
+                pdf_directory=pdf_directory,
+                model_name=save_dict.get("model_name", MODEL_NAME),
+                auth_token=auth_token,
+                top_k=save_dict.get("top_k", 5)
+            )
+            
+            # Restore state
+            rag_bot.chunks = save_dict["chunks"]
+            rag_bot.processed = save_dict["processed"]
+            
+            # Restore TF-IDF state if available
+            if SKLEARN_AVAILABLE and save_dict["tfidf_vectorizer"] is not None:
+                rag_bot.retriever.tfidf_retriever.vectorizer = save_dict["tfidf_vectorizer"]
+                rag_bot.retriever.tfidf_retriever.svd = save_dict["tfidf_svd"]
+                rag_bot.retriever.tfidf_retriever.document_vectors = save_dict["tfidf_document_vectors"]
+                rag_bot.retriever.tfidf_retriever.chunks = save_dict["chunks"]
+                rag_bot.retriever.tfidf_retriever.fitted = True
+            
+            # Restore dense retriever state if available
+            if save_dict["dense_embeddings"] is not None:
+                rag_bot.retriever.dense_retriever.embeddings = save_dict["dense_embeddings"]
+                rag_bot.retriever.dense_retriever.chunks = save_dict["chunks"]
+                rag_bot.retriever.dense_retriever.fitted = True
+            
+                # Recreate FAISS index if available
+                if FAISS_AVAILABLE:
+                    embeddings = rag_bot.retriever.dense_retriever.embeddings
+                    dimension = embeddings.shape[1]
+                    rag_bot.retriever.dense_retriever.index = faiss.IndexFlatIP(dimension)
+                    
+                    # Normalize vectors for cosine similarity
+                    normalized_embeddings = embeddings.copy().astype('float32')
+                    faiss.normalize_L2(normalized_embeddings)
+                    rag_bot.retriever.dense_retriever.index.add(normalized_embeddings)
+            
+            # Mark retriever as fitted
+            rag_bot.retriever.fitted = True
+            
+            logger.info("Model loaded successfully")
+            return rag_bot
+            
+        except Exception as e:
+            logger.error(f"Error loading model: {str(e)}")
+            raise
+
+
+def demo():
+    """Run a demonstration of the RAG system."""
+    # Configure the system
+    pdf_dir = input("Enter the directory containing your PDF files [./pdfs]: ") or "./pdfs"
+    hf_token = input("Enter your Hugging Face token (press Enter to use default): ") or HF_TOKEN
+    
+    # Initialize and process
+    rag_bot = HybridRAGBot(
+        pdf_directory=pdf_dir,
+        auth_token=hf_token,
+        top_k=5
+    )
+    
+    print("\nProcessing documents. This may take a while depending on the number and size of PDFs...")
+    rag_bot.process_documents()
+    
+    # Save the model
+    rag_bot.save("hybrid_rag_model.pkl")
+    print("\nModel saved to hybrid_rag_model.pkl")
+    
+    # Interactive query loop
+    print("\n=== Hybrid RAG Bot ===")
+    print("Ask questions about your documents. Type 'exit' to quit.")
+    
+    while True:
+        query = input("\nEnter your question: ")
+        if query.lower() in ['exit', 'quit']:
+            break
+        
+        result = rag_bot.answer_query(query)
+        
+        print(f"\nAnswer: {result['answer']}")
+        print("\nSources:")
+        for source in result['sources']:
+            print(f"- {source['source']} (Page {source['page']}) - Score: {source['score']:.4f}")
+    
+    print("\nThank you for using Hybrid RAG Bot!")
+
+
+# Main function for Kaggle environments
+def run_for_kaggle(pdf_directory="/kaggle/input/dataset-of-quantum-book"):
+    """Run the hybrid RAG bot with preset configuration for Kaggle."""
+    try:
+        # Initialize model
+        rag_bot = HybridRAGBot(
+            pdf_directory=pdf_directory,
+            auth_token=HF_TOKEN,
+            top_k=5
+        )
+        
+        # Process documents
+        rag_bot.process_documents()
+        
+        # Save model
+        rag_bot.save("/kaggle/working/hybrid_rag_model.pkl")
+        print("Model saved to /kaggle/working/hybrid_rag_model.pkl")
+        
+        # Test with sample queries
+        sample_queries = [
+            "What is quantum entanglement?",
+            "Explain the uncertainty principle",
+            "How do quantum computers work?",
+            "What is the relationship between quantum mechanics and relativity?",
+            "Explain the concept of quantum superposition"
+        ]
+        
+        results = []
+        for query in sample_queries:
+            print(f"\nQuery: {query}")
+            result = rag_bot.answer_query(query)
+            print(f"Answer: {result['answer']}")
+            
+            # Save results
+            results.append({
+                "query": query,
+                "answer": result["answer"],
+                "sources": [f"{s['source']} (Page {s['page']})" for s in result["sources"]]
+            })
+        
+        # Save results to CSV
+        results_df = pd.DataFrame(results)
+        results_df.to_csv("/kaggle/working/sample_results.csv", index=False)
+        print("\nSample results saved to /kaggle/working/sample_results.csv")
+        
+        return rag_bot
+    
+    except Exception as e:
+        print(f"Error in Kaggle execution: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
+
+# Default execution
+if __name__ == "__main__":
+    # Check if running in Kaggle
+    if os.path.exists("/kaggle"):
+        print("Running in Kaggle environment...")
+        run_for_kaggle()
+    else:
+        # Run demo for local environments
+        demo()
