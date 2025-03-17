@@ -478,10 +478,7 @@ tabs = st.tabs(["Ask Questions", "Document Explorer", "Query History", "System I
 # Ask Questions Tab
 with tabs[0]:
     if not st.session_state.processed:
-        st.markdown(
-            '<div class="warning-box">Please initialize the system using the sidebar controls first.</div>', 
-            unsafe_allow_html=True
-        )
+        st.markdown('<div class="warning-box">Please initialize the system using the sidebar controls first.</div>', unsafe_allow_html=True)
     else:
         st.markdown("<h2 class='sub-header'>Ask Questions About Your Documents</h2>", unsafe_allow_html=True)
         
@@ -561,10 +558,7 @@ with tabs[0]:
 # Document Explorer Tab
 with tabs[1]:
     if not st.session_state.processed:
-        st.markdown(
-            '<div class="warning-box">Please initialize the system using the sidebar controls first.</div>', 
-            unsafe_allow_html=True
-        )
+        st.markdown('<div class="warning-box">Please initialize the system using the sidebar controls first.</div>', unsafe_allow_html=True)
     else:
         st.markdown("<h2 class='sub-header'>Document Explorer</h2>", unsafe_allow_html=True)
         
