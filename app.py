@@ -15,26 +15,30 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("streamlit_app")
 
-# Import the RAG system (assuming it's in a file named rag_system.py)
-# You might need to adjust this import based on your file structure
-from hybrid_rag_system import (
-    HybridRAGBot,
-    AdvancedPDFProcessor,
-    HybridRetriever,
-    TFIDFRetriever,
-    DenseRetriever,
-    LLMGenerator,
-    DocumentChunk,
-    PDF_DIRECTORY,
-    MODEL_NAME,
-    EMBEDDING_MODEL_NAME,
-    HF_TOKEN,
-    CHUNK_SIZE,
-    CHUNK_OVERLAP,
-    SENTENCE_TRANSFORMERS_AVAILABLE,
-    FAISS_AVAILABLE,
-    TRANSFORMERS_AVAILABLE
-)
+# Import the RAG system
+try:
+    from hybrid_rag_system import (
+        HybridRAGBot,
+        AdvancedPDFProcessor,
+        HybridRetriever,
+        TFIDFRetriever,
+        DenseRetriever,
+        LLMGenerator,
+        DocumentChunk,
+        PDF_DIRECTORY,
+        MODEL_NAME,
+        EMBEDDING_MODEL_NAME,
+        HF_TOKEN,
+        CHUNK_SIZE,
+        CHUNK_OVERLAP,
+        SENTENCE_TRANSFORMERS_AVAILABLE,
+        FAISS_AVAILABLE,
+        TRANSFORMERS_AVAILABLE
+    )
+    SYSTEM_IMPORTED = True
+except ImportError as e:
+    logger.error(f"Error importing hybrid_rag_system: {str(e)}")
+    SYSTEM_IMPORTED = False
 
 # Page configuration
 st.set_page_config(
@@ -140,27 +144,6 @@ st.markdown("""
         margin-bottom: 1rem;
         border: 1px solid #BFDBFE;
     }
-    .checkbox-card label {
-        background-color: #F9FAFB;
-        padding: 0.75rem;
-        border-radius: 0.5rem;
-        border: 1px solid #E5E7EB;
-        margin-bottom: 0.5rem;
-        display: block;
-    }
-    .checkbox-card label:hover {
-        background-color: #F0F7FF;
-        border-color: #BFDBFE;
-    }
-    .code-block {
-        background-color: #1F2937;
-        color: #F9FAFB;
-        padding: 1rem;
-        border-radius: 0.5rem;
-        font-family: monospace;
-        overflow-x: auto;
-        margin-bottom: 1rem;
-    }
     .system-status {
         font-weight: bold;
         padding: 0.35rem 0.75rem;
@@ -182,6 +165,16 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+# Check if system is imported
+if not SYSTEM_IMPORTED:
+    st.error("""
+    Failed to import the Hybrid RAG System. Please check that the file hybrid_rag_system.py 
+    exists in the same directory as this app.py file and that all dependencies are installed.
+    
+    Error details are available in the logs.
+    """)
+    st.stop()
 
 # Initialize session state variables
 if 'rag_bot' not in st.session_state:
@@ -486,314 +479,4 @@ tabs = st.tabs(["Ask Questions", "Document Explorer", "Query History", "System I
 with tabs[0]:
     if not st.session_state.processed:
         st.markdown(
-            '<div class="warning-box">Please initialize the system using the sidebar controls first.</div>', 
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown("<h2 class='sub-header'>Ask Questions About Your Documents</h2>", unsafe_allow_html=True)
-        
-        # Query input
-        query = st.text_area("Enter your question", height=100, placeholder="What would you like to know about the documents?")
-        
-        col1, col2 = st.columns([1, 5])
-        
-        # Submit button
-        with col1:
-            submit_button = st.button("Submit", type="primary", disabled=not query or len(query.strip()) < 3)
-        
-        # Query settings
-        with col2:
-            max_context = st.slider("Context chunks", min_value=1, max_value=20, value=st.session_state.rag_bot.top_k if st.session_state.rag_bot else 5, 
-                                 help="Number of document chunks to retrieve for context")
-        
-        # Process query when button is clicked
-        if submit_button and query:
-            with st.spinner("Generating answer..."):
-                try:
-                    # Record start time
-                    start_time = time.time()
-                    
-                    # Update top_k if changed
-                    if st.session_state.rag_bot.top_k != max_context:
-                        st.session_state.rag_bot.top_k = max_context
-                    
-                    # Generate answer
-                    result = st.session_state.rag_bot.answer_query(query)
-                    
-                    # Calculate query time
-                    query_time = time.time() - start_time
-                    
-                    # Update average query time
-                    if st.session_state.query_time == 0:
-                        st.session_state.query_time = query_time
-                    else:
-                        st.session_state.query_time = (st.session_state.query_time + query_time) / 2
-                    
-                    # Save to history
-                    st.session_state.query_history.append({
-                        "query": query,
-                        "answer": result["answer"],
-                        "sources": result["sources"],
-                        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "query_time": query_time
-                    })
-                    
-                    # Display success message with time
-                    st.markdown(
-                        f'<div class="success-box">Answer generated in {query_time:.2f} seconds</div>',
-                        unsafe_allow_html=True
-                    )
-                    
-                    # Display answer
-                    st.markdown("<h3>Answer:</h3>", unsafe_allow_html=True)
-                    st.markdown(
-                        f'<div class="answer-box">{result["answer"].replace(chr(10), "<br>")}</div>',
-                        unsafe_allow_html=True
-                    )
-                    
-                    # Display sources
-                    st.markdown("<h3>Sources:</h3>", unsafe_allow_html=True)
-                    
-                    for i, source in enumerate(result["sources"]):
-                        st.markdown(
-                            f'<div class="source-box"><b>{source["source"]}</b> (Page {source["page"]})<br>'
-                            f'Relevance: {source["score"]:.4f}</div>',
-                            unsafe_allow_html=True
-                        )
-                    
-                except Exception as e:
-                    st.error(f"Error processing query: {str(e)}")
-                    logger.error(f"Query processing error: {str(e)}", exc_info=True)
-
-# Document Explorer Tab
-with tabs[1]:
-    if not st.session_state.processed:
-        st.markdown(
-            '<div class="warning-box">Please initialize the system using the sidebar controls first.</div>', 
-            unsafe_allow_html=True
-        )
-    else:
-        st.markdown("<h2 class='sub-header'>Document Explorer</h2>", unsafe_allow_html=True)
-        
-        # Display list of documents
-        st.markdown(f"### {len(st.session_state.pdf_files)} Document{'s' if len(st.session_state.pdf_files) != 1 else ''}")
-        
-        # Create a table of documents
-        if st.session_state.pdf_files:
-            # Create a dataframe for the documents table
-            docs_data = []
-            for pdf_file in st.session_state.pdf_files:
-                pdf_path = os.path.join(pdf_dir, pdf_file)
-                file_size_mb = os.path.getsize(pdf_path) / (1024 * 1024) if os.path.exists(pdf_path) else 0
-                
-                # Count chunks for this document if available
-                doc_chunks = 0
-                if hasattr(st.session_state.rag_bot, 'chunks'):
-                    doc_chunks = sum(1 for chunk in st.session_state.rag_bot.chunks if chunk.source == pdf_file)
-                
-                docs_data.append({
-                    "Filename": pdf_file,
-                    "Size (MB)": f"{file_size_mb:.2f}",
-                    "Chunks": doc_chunks
-                })
-            
-            # Convert to dataframe and display
-            docs_df = pd.DataFrame(docs_data)
-            st.dataframe(docs_df, use_container_width=True)
-            
-            # Visualize chunk distribution
-            if hasattr(st.session_state.rag_bot, 'chunks') and st.session_state.rag_bot.chunks:
-                st.markdown("### Chunk Distribution")
-                
-                # Count chunks per document
-                chunk_counts = {}
-                for chunk in st.session_state.rag_bot.chunks:
-                    if chunk.source in chunk_counts:
-                        chunk_counts[chunk.source] += 1
-                    else:
-                        chunk_counts[chunk.source] = 1
-                
-                # Convert to dataframe for plotting
-                chunk_df = pd.DataFrame({
-                    'Document': list(chunk_counts.keys()),
-                    'Chunks': list(chunk_counts.values())
-                })
-                
-                # Plot horizontal bar chart
-                fig = px.bar(
-                    chunk_df,
-                    x='Chunks',
-                    y='Document',
-                    orientation='h',
-                    title='Number of Chunks per Document',
-                    color='Chunks',
-                    color_continuous_scale='Blues'
-                )
-                
-                # Update layout
-                fig.update_layout(
-                    xaxis_title='Number of Chunks',
-                    yaxis_title='Document',
-                    height=max(300, 50 * len(chunk_counts)),
-                    yaxis={'categoryorder': 'total ascending'}
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Chunk length distribution
-                st.markdown("### Chunk Length Distribution")
-                
-                # Get length of each chunk's text
-                chunk_lengths = [len(chunk.text) for chunk in st.session_state.rag_bot.chunks]
-                
-                # Create histogram
-                fig = px.histogram(
-                    x=chunk_lengths,
-                    nbins=20,
-                    title='Distribution of Chunk Lengths',
-                    labels={'x': 'Chunk Length (characters)'},
-                    color_discrete_sequence=['#1E3A8A']
-                )
-                
-                # Update layout
-                fig.update_layout(
-                    xaxis_title='Chunk Length (characters)',
-                    yaxis_title='Count',
-                    bargap=0.1
-                )
-                
-                st.plotly_chart(fig, use_container_width=True)
-                
-                # Show chunk statistics
-                st.markdown("### Chunk Statistics")
-                col1, col2, col3, col4 = st.columns(4)
-                
-                with col1:
-                    st.metric("Total Chunks", len(st.session_state.rag_bot.chunks))
-                
-                with col2:
-                    st.metric("Avg. Chunk Length", f"{np.mean(chunk_lengths):.0f} chars")
-                
-                with col3:
-                    st.metric("Min Chunk Length", f"{min(chunk_lengths)} chars")
-                
-                with col4:
-                    st.metric("Max Chunk Length", f"{max(chunk_lengths)} chars")
-                
-                # Show chunk explorer
-                st.markdown("### Chunk Explorer")
-                
-                # Allow user to select a document to explore
-                selected_doc = st.selectbox(
-                    "Select Document", 
-                    options=list(chunk_counts.keys()),
-                    index=0
-                )
-                
-                # Get chunks for the selected document
-                doc_chunks = [chunk for chunk in st.session_state.rag_bot.chunks if chunk.source == selected_doc]
-                
-                # Display pagination controls
-                chunks_per_page = 5
-                total_pages = (len(doc_chunks) + chunks_per_page - 1) // chunks_per_page
-                
-                col1, col2, col3 = st.columns([1, 3, 1])
-                with col1:
-                    if st.button("← Previous", disabled=st.session_state.selected_index == 0):
-                        st.session_state.selected_index = max(0, st.session_state.selected_index - 1)
-                        st.experimental_rerun()
-                
-                with col2:
-                    st.markdown(f"<div style='text-align: center'>Page {st.session_state.selected_index + 1} of {total_pages}</div>", unsafe_allow_html=True)
-                
-                with col3:
-                    if st.button("Next →", disabled=st.session_state.selected_index >= total_pages - 1):
-                        st.session_state.selected_index = min(total_pages - 1, st.session_state.selected_index + 1)
-                        st.experimental_rerun()
-                
-                # Display chunks for the current page
-                start_idx = st.session_state.selected_index * chunks_per_page
-                end_idx = min(start_idx + chunks_per_page, len(doc_chunks))
-                
-                # Display each chunk
-                for i, chunk in enumerate(doc_chunks[start_idx:end_idx]):
-                    with st.expander(f"Chunk {chunk.chunk_id} (Page {chunk.page})"):
-                        st.text_area(
-                            "Chunk Content",
-                            value=chunk.text,
-                            height=200,
-                            disabled=True
-                        )
-                        
-                        # Show chunk metadata if available
-                        if hasattr(chunk, 'embedding') and chunk.embedding is not None:
-                            st.markdown(f"Embedding dimensions: {len(chunk.embedding)}")
-        else:
-            st.info("No documents available. Please initialize the system with PDF files.")
-
-# Query History Tab
-with tabs[2]:
-    st.markdown("<h2 class='sub-header'>Query History</h2>", unsafe_allow_html=True)
-    
-    if not st.session_state.query_history:
-        st.markdown(
-            '<div class="info-box">No queries have been made yet.</div>', 
-            unsafe_allow_html=True
-        )
-    else:
-        # Option to clear history
-        if st.button("Clear History"):
-            st.session_state.query_history = []
-            st.experimental_rerun()
-        
-        # Export history to CSV
-        if st.button("Export History to CSV"):
-            # Prepare data for CSV
-            history_data = []
-            for item in st.session_state.query_history:
-                # Format sources as string
-                sources_str = "; ".join([
-                    f"{s['source']} (Page {s['page']}, Score: {s['score']:.4f})" 
-                    for s in item["sources"]
-                ])
-                
-                history_data.append({
-                    "Timestamp": item["timestamp"],
-                    "Query": item["query"],
-                    "Answer": item["answer"],
-                    "Sources": sources_str,
-                    "Query Time (s)": f"{item['query_time']:.2f}"
-                })
-            
-            # Convert to DataFrame and then to CSV
-            history_df = pd.DataFrame(history_data)
-            csv = history_df.to_csv(index=False)
-            
-            # Provide download button
-            st.download_button(
-                label="Download CSV",
-                data=csv,
-                file_name="query_history.csv",
-                mime="text/csv"
-            )
-        
-        # Display history entries
-        for i, item in enumerate(reversed(st.session_state.query_history)):
-            with st.expander(f"**Q: {item['query']}** ({item['timestamp']})"):
-                st.markdown(f"**Query Time:** {item['query_time']:.2f} seconds")
-                
-                # Display answer
-                st.markdown("<h4>Answer:</h4>", unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="answer-box">{item["answer"].replace(chr(10), "<br>")}</div>',
-                    unsafe_allow_html=True
-                )
-                
-                # Display sources
-                st.markdown("<h4>Sources:</h4>", unsafe_allow_html=True)
-                for source in item["sources"]:
-                    st.markdown(
-                        f'<div class="source-box"><b>{source["source"]}</b> (Page {source["page"]})<br>'
-                        f'Relevance: {source["score"]:.4f}</div>',
-                        unsafe_allow_html=True
-                    )
+            '<div class
